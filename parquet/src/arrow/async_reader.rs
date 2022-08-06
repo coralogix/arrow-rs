@@ -84,6 +84,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow::array::{Array, ArrayRef};
 use bytes::Bytes;
 use futures::future::{BoxFuture, FutureExt};
 use futures::ready;
@@ -311,6 +312,8 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             schema: self.schema.clone(),
         };
 
+        let projected_schema = self.projection.project(&self.schema);
+
         Ok(ParquetRecordBatchStream {
             metadata: self.metadata,
             batch_size: self.batch_size,
@@ -318,13 +321,18 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             projection: self.projection,
             selection: self.selection,
             schema: self.schema,
+            projected_schema,
             reader: Some(reader),
             state: StreamState::Init,
         })
     }
 }
 
-type ReadResult<T> = Result<(ReaderFactory<T>, Option<ParquetRecordBatchReader>)>;
+type ReadResult<T> = Result<(
+    ReaderFactory<T>,
+    Option<ParquetRecordBatchReader>,
+    Vec<Option<ArrayRef>>,
+)>;
 
 /// [`ReaderFactory`] is used by [`ParquetRecordBatchStream`] to create
 /// [`ParquetRecordBatchReader`]
@@ -349,7 +357,7 @@ where
         mut self,
         row_group_idx: usize,
         mut selection: Option<RowSelection>,
-        projection: ProjectionMask,
+        mut projection: ProjectionMask,
         batch_size: usize,
     ) -> ReadResult<T> {
         // TODO: calling build_array multiple times is wasteful
@@ -364,13 +372,17 @@ where
             column_chunks: vec![None; meta.columns().len()],
         };
 
+        let num_columns = projection.num_leaves(meta.num_columns());
+        let mut buffer: Vec<Option<ArrayRef>> = vec![None; num_columns];
+
         if let Some(filter) = self.filter.as_mut() {
             for predicate in filter.predicates.iter_mut() {
                 if !selects_any(selection.as_ref()) {
-                    return Ok((self, None));
+                    return Ok((self, None, vec![]));
                 }
 
                 let predicate_projection = predicate.projection().clone();
+
                 row_group
                     .fetch(
                         &mut self.input,
@@ -380,23 +392,48 @@ where
                     )
                     .await?;
 
+                let projected_indices =
+                    predicate_projection.leaf_indices(meta.num_columns());
+
                 let array_reader = build_array_reader(
                     self.schema.clone(),
                     predicate_projection,
                     &row_group,
                 )?;
 
-                selection = Some(evaluate_predicate(
+                let (next_selection, batch) = evaluate_predicate(
                     batch_size,
                     array_reader,
-                    selection,
+                    &selection,
                     predicate.as_mut(),
-                )?);
+                )?;
+
+                if !next_selection.selects_any() {
+                    return Ok((self, None, vec![]));
+                }
+
+                for array in buffer.iter_mut().flatten() {
+                    *array = next_selection.filter_array(array).unwrap();
+                }
+
+                for (array, idx) in batch.columns().iter().zip(projected_indices) {
+                    if projection.leaf_included(idx) {
+                        buffer[idx] = Some(array.clone());
+                        projection.exclude_leaf(idx, meta.num_columns());
+                    }
+                }
+
+                selection = Some(
+                    selection
+                        .as_ref()
+                        .map(|current_selection| current_selection.and(&next_selection))
+                        .unwrap_or(next_selection),
+                );
             }
         }
 
         if !selects_any(selection.as_ref()) {
-            return Ok((self, None));
+            return Ok((self, None, vec![]));
         }
 
         row_group
@@ -409,7 +446,7 @@ where
             selection,
         );
 
-        Ok((self, Some(reader)))
+        Ok((self, Some(reader), buffer))
     }
 }
 
@@ -417,7 +454,7 @@ enum StreamState<T> {
     /// At the start of a new row group, or the end of the parquet stream
     Init,
     /// Decoding a batch
-    Decoding(ParquetRecordBatchReader),
+    Decoding(ParquetRecordBatchReader, Vec<Option<ArrayRef>>),
     /// Reading data from input
     Reading(BoxFuture<'static, ReadResult<T>>),
     /// Error
@@ -428,7 +465,7 @@ impl<T> std::fmt::Debug for StreamState<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             StreamState::Init => write!(f, "StreamState::Init"),
-            StreamState::Decoding(_) => write!(f, "StreamState::Decoding"),
+            StreamState::Decoding(_, _) => write!(f, "StreamState::Decoding"),
             StreamState::Reading(_) => write!(f, "StreamState::Reading"),
             StreamState::Error => write!(f, "StreamState::Error"),
         }
@@ -441,6 +478,8 @@ pub struct ParquetRecordBatchStream<T> {
     metadata: Arc<ParquetMetaData>,
 
     schema: SchemaRef,
+
+    projected_schema: SchemaRef,
 
     row_groups: VecDeque<usize>,
 
@@ -487,8 +526,34 @@ where
     ) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                StreamState::Decoding(batch_reader) => match batch_reader.next() {
-                    Some(Ok(batch)) => return Poll::Ready(Some(Ok(batch))),
+                StreamState::Decoding(batch_reader, decode_buffer) => match batch_reader
+                    .next()
+                {
+                    Some(Ok(batch)) => {
+                        let mut next_col_idx = 0;
+                        let num_rows = batch.num_rows();
+
+                        let mut arrays = vec![];
+
+                        for buffered_array in decode_buffer.iter_mut() {
+                            if let Some(array) = buffered_array.take() {
+                                let array_len = array.len();
+                                arrays.push(array.slice(0, num_rows));
+
+                                *buffered_array =
+                                    Some(array.slice(num_rows, array_len - num_rows));
+                            } else {
+                                arrays.push(batch.column(next_col_idx).clone());
+                                next_col_idx += 1;
+                            }
+                        }
+
+                        let final_batch =
+                            RecordBatch::try_new(self.projected_schema.clone(), arrays)
+                                .unwrap();
+
+                        return Poll::Ready(Some(Ok(final_batch)));
+                    }
                     Some(Err(e)) => {
                         self.state = StreamState::Error;
                         return Poll::Ready(Some(Err(ParquetError::ArrowError(
@@ -523,11 +588,13 @@ where
                     self.state = StreamState::Reading(fut)
                 }
                 StreamState::Reading(f) => match ready!(f.poll_unpin(cx)) {
-                    Ok((reader_factory, maybe_reader)) => {
+                    Ok((reader_factory, maybe_reader, decode_buffer)) => {
                         self.reader = Some(reader_factory);
                         match maybe_reader {
                             // Read records from [`ParquetRecordBatchReader`]
-                            Some(reader) => self.state = StreamState::Decoding(reader),
+                            Some(reader) => {
+                                self.state = StreamState::Decoding(reader, decode_buffer)
+                            }
                             // All rows skipped, read next row group
                             None => self.state = StreamState::Init,
                         }

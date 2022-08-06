@@ -136,6 +136,8 @@ pub use self::arrow_writer::ArrowWriter;
 #[cfg(feature = "async")]
 pub use self::async_reader::ParquetRecordBatchStreamBuilder;
 use crate::schema::types::SchemaDescriptor;
+use arrow::datatypes::SchemaRef;
+use std::sync::Arc;
 
 pub use self::schema::{
     arrow_to_parquet_schema, parquet_to_arrow_schema, parquet_to_arrow_schema_by_columns,
@@ -228,5 +230,51 @@ impl ProjectionMask {
     /// Returns true if the leaf column `leaf_idx` is included by the mask
     pub fn leaf_included(&self, leaf_idx: usize) -> bool {
         self.mask.as_ref().map(|m| m[leaf_idx]).unwrap_or(true)
+    }
+
+    /// Return the indices of leaves selected by this  `ProjectionMask`
+    pub fn leaf_indices(&self, num_columns: usize) -> Vec<usize> {
+        match &self.mask {
+            Some(mask) => mask
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, b)| b.then(|| idx))
+                .collect(),
+            None => Vec::from_iter(0..num_columns),
+        }
+    }
+
+    pub fn exclude_leaf(&mut self, idx: usize, num_columns: usize) {
+        let mut mask = self.mask.take().unwrap_or_else(|| vec![true; num_columns]);
+
+        mask[idx] = false;
+
+        self.mask = Some(mask);
+    }
+
+    pub fn exclude_leaves(&mut self, indices: &[usize], num_columns: usize) {
+        let mut mask = self.mask.take().unwrap_or_else(|| vec![true; num_columns]);
+
+        for idx in indices {
+            mask[*idx] = false;
+        }
+
+        self.mask = Some(mask);
+    }
+
+    pub fn num_leaves(&self, num_columns: usize) -> usize {
+        self.mask
+            .as_ref()
+            .map(|mask| mask.iter().map(|b| if *b { 1 } else { 0 }).sum())
+            .unwrap_or(num_columns)
+    }
+
+    pub fn project(&self, schema: &SchemaRef) -> SchemaRef {
+        if self.mask.is_some() {
+            let indices = self.leaf_indices(schema.fields().len());
+            Arc::new(schema.project(&indices).unwrap())
+        } else {
+            schema.clone()
+        }
     }
 }

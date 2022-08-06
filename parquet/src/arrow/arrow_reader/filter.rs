@@ -30,7 +30,7 @@ pub trait ArrowPredicate: Send + 'static {
     /// matching the predicate.
     ///
     /// The returned [`BooleanArray`] must not contain any nulls
-    fn filter(&mut self, batch: RecordBatch) -> ArrowResult<BooleanArray>;
+    fn filter(&mut self, batch: &RecordBatch) -> ArrowResult<BooleanArray>;
 }
 
 /// An [`ArrowPredicate`] created from an [`FnMut`]
@@ -41,7 +41,7 @@ pub struct ArrowPredicateFn<F> {
 
 impl<F> ArrowPredicateFn<F>
 where
-    F: FnMut(RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
+    F: FnMut(&RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
 {
     /// Create a new [`ArrowPredicateFn`]
     pub fn new(projection: ProjectionMask, f: F) -> Self {
@@ -51,13 +51,13 @@ where
 
 impl<F> ArrowPredicate for ArrowPredicateFn<F>
 where
-    F: FnMut(RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
+    F: FnMut(&RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
 {
     fn projection(&self) -> &ProjectionMask {
         &self.projection
     }
 
-    fn filter(&mut self, batch: RecordBatch) -> ArrowResult<BooleanArray> {
+    fn filter(&mut self, batch: &RecordBatch) -> ArrowResult<BooleanArray> {
         (self.f)(batch)
     }
 }

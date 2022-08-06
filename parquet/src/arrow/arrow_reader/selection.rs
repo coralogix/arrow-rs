@@ -15,8 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow::array::{Array, BooleanArray};
-use arrow::compute::SlicesIterator;
+use arrow::array::{Array, ArrayRef, BooleanArray};
+use arrow::compute::{concat, SlicesIterator};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::ops::Range;
@@ -194,6 +194,26 @@ impl RowSelection {
             }
         }
         Self { selectors }
+    }
+
+    /// Applies `self` to a single array. Returns `None` if
+    pub fn filter_array(&self, array: &ArrayRef) -> Option<ArrayRef> {
+        if self.selects_any() {
+            let mut offset = 0;
+            let mut slices = vec![];
+            for selector in &self.selectors {
+                if !selector.skip {
+                    slices.push(array.slice(offset, selector.row_count));
+                }
+                offset += selector.row_count;
+            }
+
+            let slice_refs: Vec<&dyn Array> = slices.iter().map(|a| a.as_ref()).collect();
+
+            Some(concat(&slice_refs).unwrap())
+        } else {
+            None
+        }
     }
 
     /// Returns `true` if this [`RowSelection`] selects any rows
