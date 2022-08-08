@@ -117,6 +117,10 @@ impl RowSelection {
         Self { selectors }
     }
 
+    pub fn selectors(&self) -> &[RowSelector] {
+        &self.selectors
+    }
+
     /// Splits off `row_count` from this [`RowSelection`]
     pub fn split_off(&mut self, row_count: usize) -> Self {
         let mut total_count = 0;
