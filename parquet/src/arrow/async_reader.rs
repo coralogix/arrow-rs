@@ -78,7 +78,7 @@
 use std::collections::VecDeque;
 use std::fmt::Formatter;
 
-use std::io::{Cursor, Read, SeekFrom};
+use std::io::{Cursor, SeekFrom};
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -93,7 +93,7 @@ use parquet_format::{PageHeader, PageLocation, PageType};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use arrow::datatypes::SchemaRef;
-use arrow::record_batch::RecordBatch;
+use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 
 use crate::arrow::array_reader::{build_array_reader, RowGroupCollection};
 use crate::arrow::arrow_reader::{
@@ -526,42 +526,48 @@ where
     ) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                StreamState::Decoding(batch_reader, decode_buffer) => match batch_reader
-                    .next()
-                {
-                    Some(Ok(batch)) => {
-                        let mut next_col_idx = 0;
-                        let num_rows = batch.num_rows();
+                StreamState::Decoding(batch_reader, decode_buffer) => {
+                    match batch_reader.next() {
+                        Some(Ok(batch)) => {
+                            let mut next_col_idx = 0;
+                            let num_rows = batch.num_rows();
 
-                        let mut arrays = vec![];
+                            let mut arrays = vec![];
 
-                        for buffered_array in decode_buffer.iter_mut() {
-                            if let Some(array) = buffered_array.take() {
-                                let array_len = array.len();
-                                arrays.push(array.slice(0, num_rows));
+                            for buffered_array in decode_buffer.iter_mut() {
+                                if let Some(array) = buffered_array.take() {
+                                    let array_len = array.len();
+                                    arrays.push(array.slice(0, num_rows));
 
-                                *buffered_array =
-                                    Some(array.slice(num_rows, array_len - num_rows));
-                            } else {
-                                arrays.push(batch.column(next_col_idx).clone());
-                                next_col_idx += 1;
+                                    *buffered_array =
+                                        Some(array.slice(num_rows, array_len - num_rows));
+                                } else {
+                                    arrays.push(batch.column(next_col_idx).clone());
+                                    next_col_idx += 1;
+                                }
                             }
+
+                            let mut options = RecordBatchOptions::default();
+                            options.row_count = Some(num_rows);
+
+                            let final_batch = RecordBatch::try_new_with_options(
+                                self.projected_schema.clone(),
+                                arrays,
+                                &options,
+                            )
+                            .unwrap();
+
+                            return Poll::Ready(Some(Ok(final_batch)));
                         }
-
-                        let final_batch =
-                            RecordBatch::try_new(self.projected_schema.clone(), arrays)
-                                .unwrap();
-
-                        return Poll::Ready(Some(Ok(final_batch)));
+                        Some(Err(e)) => {
+                            self.state = StreamState::Error;
+                            return Poll::Ready(Some(Err(ParquetError::ArrowError(
+                                e.to_string(),
+                            ))));
+                        }
+                        None => self.state = StreamState::Init,
                     }
-                    Some(Err(e)) => {
-                        self.state = StreamState::Error;
-                        return Poll::Ready(Some(Err(ParquetError::ArrowError(
-                            e.to_string(),
-                        ))));
-                    }
-                    None => self.state = StreamState::Init,
-                },
+                }
                 StreamState::Init => {
                     let row_group_idx = match self.row_groups.pop_front() {
                         Some(idx) => idx,

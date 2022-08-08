@@ -374,11 +374,6 @@ pub(crate) fn evaluate_predicate(
     let batch = RecordBatch::concat(&schema, &batches)?;
 
     Ok((RowSelection::from_filters(&filters), batch))
-    // let raw = RowSelection::from_filters(&filters);
-    // Ok(match selection {
-    //     Some(selection) => selection.and(&raw),
-    //     None => raw,
-    // })
 }
 
 #[cfg(test)]
@@ -891,7 +886,7 @@ mod tests {
         /// Encoding
         encoding: Encoding,
         //row selections and total selected row count
-        row_selections: Option<(Vec<RowSelection>, usize)>,
+        row_selections: Option<(RowSelection, usize)>,
     }
 
     impl Default for TestOptions {
@@ -1189,7 +1184,7 @@ mod tests {
             let mut without_skip_data = gen_expected_data::<T>(&def_levels, &values);
 
             let mut skip_data: Vec<Option<T::T>> = vec![];
-            for select in selections {
+            for select in selections.selectors() {
                 if select.skip {
                     without_skip_data.drain(0..select.row_count);
                 } else {
@@ -1838,7 +1833,7 @@ mod tests {
         step_len: usize,
         total_len: usize,
         skip_first: bool,
-    ) -> (Vec<RowSelection>, usize) {
+    ) -> (RowSelection, usize) {
         let mut remaining = total_len;
         let mut skip = skip_first;
         let mut vec = vec![];
@@ -1849,7 +1844,7 @@ mod tests {
             } else {
                 remaining
             };
-            vec.push(RowSelection {
+            vec.push(RowSelector {
                 row_count: step,
                 skip,
             });
@@ -1859,7 +1854,7 @@ mod tests {
             }
             skip = !skip;
         }
-        (vec, selected_count)
+        (RowSelection::from(vec), selected_count)
     }
 
     #[test]
@@ -1919,30 +1914,6 @@ mod tests {
             )
             .unwrap();
             skip_arrow_reader.get_record_reader(batch_size).unwrap()
-        }
-
-        fn create_test_selection(
-            step_len: usize,
-            total_len: usize,
-            skip_first: bool,
-        ) -> RowSelection {
-            let mut remaining = total_len;
-            let mut skip = skip_first;
-            let mut vec = vec![];
-            while remaining != 0 {
-                let step = if remaining > step_len {
-                    step_len
-                } else {
-                    remaining
-                };
-                vec.push(RowSelector {
-                    row_count: step,
-                    skip,
-                });
-                remaining -= step;
-                skip = !skip;
-            }
-            vec.into()
         }
     }
 }
