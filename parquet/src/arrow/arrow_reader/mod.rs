@@ -38,7 +38,7 @@ use crate::file::serialized_reader::ReadOptionsBuilder;
 use crate::schema::types::SchemaDescriptor;
 
 #[allow(unused)]
-mod filter;
+pub mod filter;
 #[allow(unused)]
 mod selection;
 

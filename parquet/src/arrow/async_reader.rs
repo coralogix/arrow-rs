@@ -284,7 +284,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
     ///
     /// TODO: Make public once stable (#1792)
     #[allow(unused)]
-    pub(crate) fn with_row_selection(self, selection: RowSelection) -> Self {
+    pub fn with_row_selection(self, selection: RowSelection) -> Self {
         Self {
             selection: Some(selection),
             ..self
@@ -295,7 +295,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
     ///
     /// TODO: Make public once stable (#1792)
     #[allow(unused)]
-    pub(crate) fn with_row_filter(self, filter: RowFilter) -> Self {
+    pub fn with_row_filter(self, filter: RowFilter) -> Self {
         Self {
             filter: Some(filter),
             ..self
