@@ -587,6 +587,7 @@ impl InMemoryRowGroup {
             .filter_map(|(idx, chunk)| {
                 (chunk.is_none() && projection.leaf_included(idx)).then(|| {
                     let column = metadata.column(idx);
+                    println!("Fetching column {} with range {:?}", column.column_descr().name(), column.byte_range());
                     let (start, length) = column.byte_range();
                     start as usize..(start + length) as usize
                 })
