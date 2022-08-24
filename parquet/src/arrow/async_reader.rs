@@ -688,6 +688,7 @@ impl Iterator for InMemoryColumnChunkReader {
 impl PageReader for InMemoryColumnChunkReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
         println!("reading page. current offset={}, row offset={}, total rows={}, chunk size={}", self.offset, self.seen_num_values, self.chunk.num_values, self.chunk.data.len());
+        println!("reading page. current offset={}, row offset={}, total rows={}, chunk size={}", self.offset, self.seen_num_values, self.chunk.num_values, self.chunk.data.len());
         while self.seen_num_values < self.chunk.num_values {
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = if let Some(page_header) = self.next_page_header.take() {
@@ -780,12 +781,19 @@ impl PageReader for InMemoryColumnChunkReader {
             println!("Skipping buffered page with size {}", buffered_header.compressed_page_size);
             // The next page header has already been peeked, so just advance the offset
             self.offset += buffered_header.compressed_page_size as usize;
+            if let Ok(page_metadata) = PageMetadata::try_from(&buffered_header) {
+                self.seen_num_values += page_metadata.num_rows as i64;
+            }
+
         } else {
             println!("skip: reading page header at offset {}, row offset={}", self.offset, self.seen_num_values);
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = read_page_header(&mut cursor)?;
             self.offset += cursor.position() as usize;
             self.offset += page_header.compressed_page_size as usize;
+            if let Ok(page_metadata) = PageMetadata::try_from(&page_header) {
+                self.seen_num_values += page_metadata.num_rows as i64;
+            }
         }
 
         Ok(())
