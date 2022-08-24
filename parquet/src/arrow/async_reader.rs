@@ -745,6 +745,7 @@ impl PageReader for InMemoryColumnChunkReader {
     fn peek_next_page(&mut self) -> Result<Option<PageMetadata>> {
         while self.seen_num_values < self.chunk.num_values {
             return if let Some(buffered_header) = self.next_page_header.as_ref() {
+                println!("peeking buffered page header at offset {}, row offset={}", self.offset, self.seen_num_values);
                 if let Ok(page_metadata) = buffered_header.try_into() {
                     Ok(Some(page_metadata))
                 } else {
@@ -775,6 +776,7 @@ impl PageReader for InMemoryColumnChunkReader {
 
     fn skip_next_page(&mut self) -> Result<()> {
         if let Some(buffered_header) = self.next_page_header.take() {
+            println!("Skipping buffered page with size {}", buffered_header.compressed_page_size);
             // The next page header has already been peeked, so just advance the offset
             self.offset += buffered_header.compressed_page_size as usize;
         } else {
