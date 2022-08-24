@@ -767,11 +767,17 @@ impl PageReader for InMemoryColumnChunkReader {
         if let Some(buffered_header) = self.next_page_header.take() {
             // The next page header has already been peeked, so just advance the offset
             self.offset += buffered_header.compressed_page_size as usize;
+            if let Ok(page_metadata) = PageMetadata::try_from(&buffered_header) {
+                self.seen_num_values += page_metadata.num_rows as i64;
+            }
         } else {
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = read_page_header(&mut cursor)?;
             self.offset += cursor.position() as usize;
             self.offset += page_header.compressed_page_size as usize;
+            if let Ok(page_metadata) = PageMetadata::try_from(&page_header) {
+                self.seen_num_values += page_metadata.num_rows as i64;
+            }
         }
 
         Ok(())
