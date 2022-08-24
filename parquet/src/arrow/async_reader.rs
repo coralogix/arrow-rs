@@ -687,7 +687,7 @@ impl Iterator for InMemoryColumnChunkReader {
 
 impl PageReader for InMemoryColumnChunkReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
-        println!("reading page. current offset={}, row offset={}", self.offset, self.seen_num_values);
+        println!("reading page. current offset={}, row offset={}, total rows={}", self.offset, self.seen_num_values, self.chunk.num_values);
         while self.seen_num_values < self.chunk.num_values {
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = if let Some(page_header) = self.next_page_header.take() {
@@ -716,6 +716,7 @@ impl PageReader for InMemoryColumnChunkReader {
                         self.chunk.physical_type,
                         self.decompressor.as_mut(),
                     )?;
+                    println!("decoded {} rows", decoded.num_values());
                     self.seen_num_values += decoded.num_values() as i64;
                     decoded
                 }
