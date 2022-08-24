@@ -387,6 +387,7 @@ where
                 }
 
                 let predicate_projection = predicate.projection().clone();
+                println!("Evaluating predicate to projection {:?}", predicate_projection);
                 row_group
                     .fetch(
                         &mut self.input,
@@ -415,6 +416,7 @@ where
             return Ok((self, None));
         }
 
+        println!("Fetching filtered row group for projection {:?}", projection);
         row_group
             .fetch(&mut self.input, meta, &projection, selection.as_ref())
             .await?;
@@ -684,6 +686,7 @@ impl Iterator for InMemoryColumnChunkReader {
 
 impl PageReader for InMemoryColumnChunkReader {
     fn get_next_page(&mut self) -> Result<Option<Page>> {
+        println!("reading page. current offset={}, row offset={}", self.offset, self.seen_num_values);
         while self.seen_num_values < self.chunk.num_values {
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = if let Some(page_header) = self.next_page_header.take() {
@@ -705,6 +708,7 @@ impl PageReader for InMemoryColumnChunkReader {
 
             let result = match page_header.type_ {
                 PageType::DataPage | PageType::DataPageV2 => {
+                    println!("decoding data page with size {}", buffer.len());
                     let decoded = decode_page(
                         page_header,
                         buffer.into(),
@@ -714,13 +718,17 @@ impl PageReader for InMemoryColumnChunkReader {
                     self.seen_num_values += decoded.num_values() as i64;
                     decoded
                 }
-                PageType::DictionaryPage => decode_page(
-                    page_header,
-                    buffer.into(),
-                    self.chunk.physical_type,
-                    self.decompressor.as_mut(),
-                )?,
+                PageType::DictionaryPage => {
+                    println!("decoding dictionary page with size {}", buffer.len());
+                    decode_page(
+                        page_header,
+                        buffer.into(),
+                        self.chunk.physical_type,
+                        self.decompressor.as_mut(),
+                    )?
+                },
                 _ => {
+                    println!("unknown page type, skipping");
                     // For unknown page type (e.g., INDEX_PAGE), skip and read next.
                     continue;
                 }
@@ -744,6 +752,7 @@ impl PageReader for InMemoryColumnChunkReader {
                     continue;
                 }
             } else {
+                println!("peeking page header at offset {}, row offset={}", self.offset, self.seen_num_values);
                 let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
                 let page_header = read_page_header(&mut cursor)?;
                 self.offset += cursor.position() as usize;
@@ -768,6 +777,7 @@ impl PageReader for InMemoryColumnChunkReader {
             // The next page header has already been peeked, so just advance the offset
             self.offset += buffered_header.compressed_page_size as usize;
         } else {
+            println!("skip: reading page header at offset {}, row offset={}", self.offset, self.seen_num_values);
             let mut cursor = Cursor::new(&self.chunk.data.as_ref()[self.offset..]);
             let page_header = read_page_header(&mut cursor)?;
             self.offset += cursor.position() as usize;

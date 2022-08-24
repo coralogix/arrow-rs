@@ -577,6 +577,8 @@ impl<T: Read + Send> PageReader for SerializedPageReader<T> {
                 }
             }
 
+            println!("Reading page at row offset {}", self.seen_num_values);
+
             let page_header = read_page_header(cursor)?;
 
             let to_read = page_header.compressed_page_size as usize;
