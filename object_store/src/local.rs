@@ -385,10 +385,10 @@ impl ObjectStore for LocalFileSystem {
         .await
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>> {
         let config = Arc::clone(&self.config);
 
         let root_path = match prefix {

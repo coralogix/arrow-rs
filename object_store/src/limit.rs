@@ -129,10 +129,10 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         self.inner.delete(location).await
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>> {
         let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
         let s = self.inner.list(prefix).await?;
         Ok(PermitWrapper::new(s, permit).boxed())

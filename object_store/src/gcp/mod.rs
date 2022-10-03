@@ -662,10 +662,10 @@ impl ObjectStore for GoogleCloudStorage {
         self.client.delete_request(location).await
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>> {
         let stream = self
             .client
             .list_paginated(prefix, false)

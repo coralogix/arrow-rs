@@ -159,10 +159,10 @@ impl ObjectStore for InMemory {
         Ok(())
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>> {
         let last_modified = Utc::now();
 
         let storage = self.storage.read();

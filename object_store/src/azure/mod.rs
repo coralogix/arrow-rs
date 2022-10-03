@@ -142,7 +142,7 @@ impl std::fmt::Display for MicrosoftAzure {
 }
 
 #[async_trait]
-impl ObjectStore for MicrosoftAzure {
+impl ObjectStore<'f> for MicrosoftAzure {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
         self.client
             .put_request(location, Some(bytes), false, &())
@@ -235,7 +235,7 @@ impl ObjectStore for MicrosoftAzure {
         self.client.delete_request(location, &()).await
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
     ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {

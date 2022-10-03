@@ -258,10 +258,10 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     ///
     /// Prefixes are evaluated on a path segment basis, i.e. `foo/bar/` is a prefix of `foo/bar/x` but not of
     /// `foo/bar_baz/x`.
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>>;
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>>;
 
     /// List objects with the given prefix and an implementation specific
     /// delimiter. Returns common prefixes (directories) in addition to object

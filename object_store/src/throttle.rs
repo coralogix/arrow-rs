@@ -232,10 +232,10 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         self.inner.delete(location).await
     }
 
-    async fn list(
+    async fn list<'f>(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
+    ) -> Result<BoxStream<'f, Result<ObjectMeta>>> {
         sleep(self.config().wait_list_per_call).await;
 
         // need to copy to avoid moving / referencing `self`
