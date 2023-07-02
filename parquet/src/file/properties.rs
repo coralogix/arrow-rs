@@ -112,9 +112,7 @@ pub type WriterPropertiesPtr = Arc<WriterProperties>;
 /// ```
 #[derive(Debug, Clone)]
 pub struct WriterProperties {
-    data_page_size_limit: usize,
     dictionary_page_size_limit: usize,
-    data_page_row_count_limit: usize,
     write_batch_size: usize,
     max_row_group_size: usize,
     writer_version: WriterVersion,
@@ -150,7 +148,9 @@ impl WriterProperties {
     /// Note: this is a best effort limit based on the write batch size
     #[deprecated(since = "41.0.0", note = "Use data_page_size_limit")]
     pub fn data_pagesize_limit(&self) -> usize {
-        self.data_page_size_limit
+        self.default_column_properties
+            .data_page_size_limit()
+            .unwrap_or(DEFAULT_PAGE_SIZE)
     }
 
     /// Returns data page size limit.
@@ -159,7 +159,9 @@ impl WriterProperties {
     ///
     /// For more details see [`WriterPropertiesBuilder::set_data_page_size_limit`]
     pub fn data_page_size_limit(&self) -> usize {
-        self.data_page_size_limit
+        self.default_column_properties
+            .data_page_size_limit()
+            .unwrap_or(DEFAULT_PAGE_SIZE)
     }
 
     /// Returns dictionary page size limit.
@@ -185,7 +187,9 @@ impl WriterProperties {
     ///
     /// For more details see [`WriterPropertiesBuilder::set_data_page_row_count_limit`]
     pub fn data_page_row_count_limit(&self) -> usize {
-        self.data_page_row_count_limit
+        self.default_column_properties
+            .data_page_row_count_limit()
+            .unwrap_or(usize::MAX)
     }
 
     /// Returns configured batch size for writes.
@@ -313,9 +317,7 @@ impl WriterProperties {
 /// Builder for parquet file writer configuration. See example on
 /// [`WriterProperties`]
 pub struct WriterPropertiesBuilder {
-    data_page_size_limit: usize,
     dictionary_page_size_limit: usize,
-    data_page_row_count_limit: usize,
     write_batch_size: usize,
     max_row_group_size: usize,
     writer_version: WriterVersion,
@@ -331,9 +333,7 @@ impl WriterPropertiesBuilder {
     /// Returns default state of the builder.
     fn with_defaults() -> Self {
         Self {
-            data_page_size_limit: DEFAULT_PAGE_SIZE,
             dictionary_page_size_limit: DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT,
-            data_page_row_count_limit: usize::MAX,
             write_batch_size: DEFAULT_WRITE_BATCH_SIZE,
             max_row_group_size: DEFAULT_MAX_ROW_GROUP_SIZE,
             writer_version: DEFAULT_WRITER_VERSION,
@@ -349,9 +349,7 @@ impl WriterPropertiesBuilder {
     /// Finalizes the configuration and returns immutable writer properties struct.
     pub fn build(self) -> WriterProperties {
         WriterProperties {
-            data_page_size_limit: self.data_page_size_limit,
             dictionary_page_size_limit: self.dictionary_page_size_limit,
-            data_page_row_count_limit: self.data_page_row_count_limit,
             write_batch_size: self.write_batch_size,
             max_row_group_size: self.max_row_group_size,
             writer_version: self.writer_version,
@@ -379,7 +377,8 @@ impl WriterPropertiesBuilder {
     /// [`set_write_batch_size`](Self::set_write_batch_size).
     #[deprecated(since = "41.0.0", note = "Use set_data_page_size_limit")]
     pub fn set_data_pagesize_limit(mut self, value: usize) -> Self {
-        self.data_page_size_limit = value;
+        self.default_column_properties
+            .set_data_page_size_limit(value);
         self
     }
 
@@ -393,7 +392,8 @@ impl WriterPropertiesBuilder {
     /// Note: this is a best effort limit based on value of
     /// [`set_write_batch_size`](Self::set_write_batch_size).
     pub fn set_data_page_size_limit(mut self, value: usize) -> Self {
-        self.data_page_size_limit = value;
+        self.default_column_properties
+            .set_data_page_size_limit(value);
         self
     }
 
@@ -407,7 +407,8 @@ impl WriterPropertiesBuilder {
     /// Note: this is a best effort limit based on value of
     /// [`set_write_batch_size`](Self::set_write_batch_size).
     pub fn set_data_page_row_count_limit(mut self, value: usize) -> Self {
-        self.data_page_row_count_limit = value;
+        self.default_column_properties
+            .set_data_page_row_count_limit(value);
         self
     }
 
@@ -713,6 +714,8 @@ struct ColumnProperties {
     max_statistics_size: Option<usize>,
     /// bloom filter related properties
     bloom_filter_properties: Option<BloomFilterProperties>,
+    data_page_size_limit: Option<usize>,
+    data_page_row_count_limit: Option<usize>,
 }
 
 impl ColumnProperties {
@@ -819,6 +822,22 @@ impl ColumnProperties {
     /// Returns the bloom filter properties, or `None` if not enabled
     fn bloom_filter_properties(&self) -> Option<&BloomFilterProperties> {
         self.bloom_filter_properties.as_ref()
+    }
+
+    fn data_page_row_count_limit(&self) -> Option<usize> {
+        self.data_page_row_count_limit
+    }
+
+    fn set_data_page_row_count_limit(&mut self, value: usize) {
+        self.data_page_row_count_limit = Some(value);
+    }
+
+    fn data_page_size_limit(&self) -> Option<usize> {
+        self.data_page_size_limit
+    }
+
+    fn set_data_page_size_limit(&mut self, value: usize) {
+        self.data_page_size_limit = Some(value);
     }
 }
 
