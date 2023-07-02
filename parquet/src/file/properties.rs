@@ -659,6 +659,24 @@ impl WriterPropertiesBuilder {
         self.column_index_truncate_length = max_length;
         self
     }
+
+    pub fn set_data_page_size_limit_for_column(
+        mut self,
+        col: ColumnPath,
+        value: usize,
+    ) -> Self {
+        self.get_mut_props(col).set_data_page_size_limit(value);
+        self
+    }
+
+    pub fn set_data_page_row_count_limit_for_column(
+        mut self,
+        col: ColumnPath,
+        value: usize,
+    ) -> Self {
+        self.get_mut_props(col).set_data_page_row_count_limit(value);
+        self
+    }
 }
 
 /// Controls the level of statistics to be computed by the writer
