@@ -312,6 +312,20 @@ impl WriterProperties {
             .and_then(|c| c.bloom_filter_properties())
             .or_else(|| self.default_column_properties.bloom_filter_properties())
     }
+
+    pub fn data_page_row_count_limit_for_column(&self, col: &ColumnPath) -> usize {
+        self.column_properties
+            .get(col)
+            .and_then(|c| c.data_page_row_count_limit())
+            .unwrap_or_else(|| self.data_page_row_count_limit())
+    }
+
+    pub fn data_page_size_limit_for_column(&self, col: &ColumnPath) -> usize {
+        self.column_properties
+            .get(col)
+            .and_then(|c| c.data_page_size_limit())
+            .unwrap_or_else(|| self.data_page_size_limit())
+    }
 }
 
 /// Builder for parquet file writer configuration. See example on

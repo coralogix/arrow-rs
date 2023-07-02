@@ -630,9 +630,13 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         }
 
         self.page_metrics.num_buffered_rows as usize
-            >= self.props.data_page_row_count_limit()
+            >= self
+                .props
+                .data_page_row_count_limit_for_column(self.descr.path())
             || self.encoder.estimated_data_page_size()
-                >= self.props.data_page_size_limit()
+                >= self
+                    .props
+                    .data_page_size_limit_for_column(self.descr.path())
     }
 
     /// Performs dictionary fallback.
