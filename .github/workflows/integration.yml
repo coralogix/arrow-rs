@@ -59,13 +59,13 @@ jobs:
       - name: Check cmake
         run: which cmake
       - name: Checkout Arrow
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: apache/arrow
           submodules: true
           fetch-depth: 0
       - name: Checkout Arrow Rust
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: rust
           fetch-depth: 0
@@ -111,7 +111,7 @@ jobs:
       matrix:
         rust: [ stable ]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Setup Rust toolchain
