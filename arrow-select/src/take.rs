@@ -214,7 +214,7 @@ fn take_impl<IndexType: ArrowPrimitiveType>(
             let type_ids = take_native(values.type_ids(), indices).into_inner();
             for (type_id, field) in fields.iter() {
                 let values = values.child(type_id);
-                let values = take_impl(values, indices)?;
+                let values = take_impl(values, indices, None)?;
                 let field = (**field).clone();
                 children.push((field, values));
                 field_type_ids.push(type_id);
