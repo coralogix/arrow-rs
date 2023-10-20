@@ -705,7 +705,7 @@ pub struct GetOptions {
 #[derive(Debug, Default)]
 pub struct PutOptions {
     /// Key/Value metadata associated with the object
-    tags: HashMap<String, String>,
+    pub tags: HashMap<String, String>,
 }
 
 impl GetOptions {
