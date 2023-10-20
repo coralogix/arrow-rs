@@ -223,7 +223,7 @@ impl ObjectStore for AmazonS3 {
         bytes: Bytes,
         options: PutOptions,
     ) -> Result<()> {
-        if !options.tags.is_empty() {
+        if options.tags.is_empty() {
             self.client
                 .put_request(location, Some(bytes), &(), None)
                 .await?;
