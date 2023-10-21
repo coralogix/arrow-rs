@@ -273,10 +273,8 @@ pub mod throttle;
 mod client;
 
 #[cfg(feature = "cloud")]
-pub use client::{
-    backoff::BackoffConfig, retry::RetryConfig, ClientConfigKey, ClientOptions,
-    CredentialProvider, StaticCredentialProvider,
-};
+pub use client::{backoff::BackoffConfig, retry::RetryConfig, CredentialProvider, ClientConfigKey, ClientOptions};
+use std::collections::HashMap;
 
 #[cfg(feature = "cloud")]
 mod config;
@@ -319,6 +317,25 @@ pub trait ObjectStore: std::fmt::Display + Send + Sync + Debug + 'static {
     /// write the entirety of `bytes` to `location`, or fail. No clients
     /// should be able to observe a partially written object
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()>;
+
+    /// Save the provided bytes to the specified location
+    ///
+    /// The operation is guaranteed to be atomic, it will either successfully
+    /// write the entirety of `bytes` to `location`, or fail. No clients
+    /// should be able to observe a partially written object
+    ///
+    /// If the specified `options` include key-value metadata, this will be stored
+    /// along with the object depending on the capabilities of the underlying implementation.
+    ///
+    /// For example, when using an AWS S3 `ObjectStore` the `tags` will be saved as object tags in S3
+    async fn put_opts(
+        &self,
+        location: &Path,
+        bytes: Bytes,
+        _options: PutOptions,
+    ) -> Result<()> {
+        self.put(location, bytes).await
+    }
 
     /// Get a multi-part upload that allows writing data in chunks
     ///
@@ -714,6 +731,13 @@ pub struct GetOptions {
     ///
     /// <https://datatracker.ietf.org/doc/html/rfc9110#name-range>
     pub range: Option<Range<usize>>,
+}
+
+/// Options for a put request, such as tags
+#[derive(Debug, Default)]
+pub struct PutOptions {
+    /// Key/Value metadata associated with the object
+    pub tags: HashMap<String, String>,
 }
 
 impl GetOptions {

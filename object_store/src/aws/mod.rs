@@ -58,7 +58,7 @@ use crate::config::ConfigValue;
 use crate::multipart::{PartId, PutPart, WriteMultiPart};
 use crate::{
     ClientOptions, GetOptions, GetResult, ListResult, MultipartId, ObjectMeta,
-    ObjectStore, Path, Result, RetryConfig,
+    ObjectStore, Path, PutOptions, Result, RetryConfig,
 };
 
 mod checksum;
@@ -214,7 +214,25 @@ impl AmazonS3 {
 #[async_trait]
 impl ObjectStore for AmazonS3 {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        self.client.put_request(location, bytes, &()).await?;
+        self.client.put_request(location, bytes, &(), None).await.map(|_| ())
+    }
+
+    async fn put_opts(
+        &self,
+        location: &Path,
+        bytes: Bytes,
+        options: PutOptions,
+    ) -> Result<()> {
+        if options.tags.is_empty() {
+            self.client
+                .put_request(location, bytes, &(), None)
+                .await?;
+        } else {
+            self.client
+                .put_request(location, bytes, &(), Some(&options.tags))
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -321,6 +339,7 @@ impl PutPart for S3MultiPartUpload {
                 &self.location,
                 buf.into(),
                 &[("partNumber", &part), ("uploadId", &self.upload_id)],
+                None,
             )
             .await?;
 
