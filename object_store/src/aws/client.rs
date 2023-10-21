@@ -17,7 +17,9 @@
 
 use crate::aws::checksum::Checksum;
 use crate::aws::credential::{AwsCredential, CredentialExt};
-use crate::aws::{AwsCredentialProvider, STORE, STRICT_PATH_ENCODE_SET};
+use crate::aws::{
+    AwsCredentialProvider, STORE, STRICT_ENCODE_SET, STRICT_PATH_ENCODE_SET,
+};
 use crate::client::get::GetClient;
 use crate::client::list::ListClient;
 use crate::client::list_response::ListResponse;
@@ -33,11 +35,12 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bytes::{Buf, Bytes};
 use itertools::Itertools;
-use percent_encoding::{utf8_percent_encode, PercentEncode};
+use percent_encoding::{percent_encode, utf8_percent_encode, PercentEncode};
 use quick_xml::events::{self as xml_events};
 use reqwest::{header::CONTENT_TYPE, Client as ReqwestClient, Method, Response};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A specialized `Error` for object store-related errors
@@ -217,6 +220,8 @@ pub(crate) struct S3Client {
     client: ReqwestClient,
 }
 
+const TAGGING_HEADER: &str = "x-amz-tagging";
+
 impl S3Client {
     pub fn new(config: S3Config) -> Result<Self> {
         let client = config.client_options.client()?;
@@ -238,6 +243,7 @@ impl S3Client {
         path: &Path,
         bytes: Option<Bytes>,
         query: &T,
+        tags: Option<&HashMap<String, String>>,
     ) -> Result<Response> {
         let credential = self.get_credential().await?;
         let url = self.config.path_url(path);
@@ -258,6 +264,20 @@ impl S3Client {
 
         if let Some(value) = self.config().client_options.get_content_type(path) {
             builder = builder.header(CONTENT_TYPE, value);
+        }
+
+        if let Some(tags) = tags {
+            let tags = tags
+                .iter()
+                .map(|(key, value)| {
+                    let key =
+                        percent_encode(key.as_bytes(), &STRICT_ENCODE_SET).to_string();
+                    let value =
+                        percent_encode(value.as_bytes(), &STRICT_ENCODE_SET).to_string();
+                    format!("{key}={value}")
+                })
+                .join("&");
+            builder = builder.header(TAGGING_HEADER, tags);
         }
 
         let response = builder
