@@ -112,6 +112,8 @@ pub enum ClientConfigKey {
     Timeout,
     /// User-Agent header to be used by this client
     UserAgent,
+    /// PEM-formatted CA certificate
+    RootCa
 }
 
 impl AsRef<str> for ClientConfigKey {
@@ -133,6 +135,7 @@ impl AsRef<str> for ClientConfigKey {
             Self::ProxyExcludes => "proxy_excludes",
             Self::Timeout => "timeout",
             Self::UserAgent => "user_agent",
+            Self::RootCa => "root_ca",
         }
     }
 }
@@ -160,6 +163,7 @@ impl FromStr for ClientConfigKey {
                 store: "HTTP",
                 key: s.into(),
             }),
+            "root_ca" => Ok(Self::RootCa),
         }
     }
 }
@@ -185,6 +189,7 @@ pub struct ClientOptions {
     http2_keep_alive_while_idle: ConfigValue<bool>,
     http1_only: ConfigValue<bool>,
     http2_only: ConfigValue<bool>,
+    root_ca: Option<String>,
 }
 
 impl Default for ClientOptions {
@@ -258,6 +263,9 @@ impl ClientOptions {
             ClientConfigKey::UserAgent => {
                 self.user_agent = Some(ConfigValue::Deferred(value.into()))
             }
+            ClientConfigKey::RootCa => {
+                self.root_ca = Some(value.into())
+            }
         }
         self
     }
@@ -293,6 +301,9 @@ impl ClientOptions {
                 .as_ref()
                 .and_then(|v| v.get().ok())
                 .and_then(|v| v.to_str().ok().map(|s| s.to_string())),
+            ClientConfigKey::RootCa => self
+                .root_ca
+                .clone(),
         }
     }
 
@@ -462,6 +473,13 @@ impl ClientOptions {
         self
     }
 
+
+    /// Set a trusted CA certificate
+    pub fn with_root_ca(mut self, root_ca: impl Into<String>) -> Self {
+        self.root_ca = Some(root_ca.into());
+        self
+    }
+
     /// Get the mime type for the file in `path` to be uploaded
     ///
     /// Gets the file extension from `path`, and returns the
@@ -562,6 +580,13 @@ impl ClientOptions {
 
         if self.allow_insecure.get()? {
             builder = builder.danger_accept_invalid_certs(true)
+        }
+
+        if let Some(cert) = &self.root_ca {
+            let certificate = reqwest::tls::Certificate::from_pem(cert.as_bytes())
+                .map_err(map_client_error)?;
+
+            builder = builder.add_root_certificate(certificate);
         }
 
         builder
@@ -715,6 +740,7 @@ mod tests {
         let proxy_url = "https://fake_proxy_url".to_string();
         let timeout = "95 seconds".to_string();
         let user_agent = "object_store:fake_user_agent".to_string();
+        let root_ca = "fake_certificate".to_string();
 
         let options = HashMap::from([
             ("allow_http", allow_http.clone()),
@@ -740,6 +766,7 @@ mod tests {
             ("proxy_url", proxy_url.clone()),
             ("timeout", timeout.clone()),
             ("user_agent", user_agent.clone()),
+            ("root_ca", root_ca.clone()),
         ]);
 
         let builder = options
@@ -830,6 +857,12 @@ mod tests {
                 .get_config_value(&ClientConfigKey::UserAgent)
                 .unwrap(),
             user_agent
+        );
+        assert_eq!(
+            builder
+                .get_config_value(&ClientConfigKey::RootCa)
+                .unwrap(),
+            root_ca
         );
     }
 }
