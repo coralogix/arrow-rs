@@ -114,7 +114,7 @@ pub enum ClientConfigKey {
     /// User-Agent header to be used by this client
     UserAgent,
     /// PEM-formatted CA certificate
-    RootCa
+    RootCa,
 }
 
 impl AsRef<str> for ClientConfigKey {
@@ -160,11 +160,11 @@ impl FromStr for ClientConfigKey {
             "proxy_url" => Ok(Self::ProxyUrl),
             "timeout" => Ok(Self::Timeout),
             "user_agent" => Ok(Self::UserAgent),
+            "root_ca" => Ok(Self::RootCa),
             _ => Err(super::Error::UnknownConfigurationKey {
                 store: "HTTP",
                 key: s.into(),
             }),
-            "root_ca" => Ok(Self::RootCa),
         }
     }
 }
@@ -238,9 +238,7 @@ impl ClientOptions {
             ClientConfigKey::UserAgent => {
                 self.user_agent = Some(ConfigValue::Deferred(value.into()))
             }
-            ClientConfigKey::RootCa => {
-                self.root_ca = Some(value.into())
-            }
+            ClientConfigKey::RootCa => self.root_ca = Some(value.into()),
         }
         self
     }
@@ -282,9 +280,7 @@ impl ClientOptions {
                 .as_ref()
                 .and_then(|v| v.get().ok())
                 .and_then(|v| v.to_str().ok().map(|s| s.to_string())),
-            ClientConfigKey::RootCa => self
-                .root_ca
-                .clone(),
+            ClientConfigKey::RootCa => self.root_ca.clone(),
         }
     }
 
@@ -436,7 +432,6 @@ impl ClientOptions {
         self.http2_keep_alive_while_idle = true.into();
         self
     }
-
 
     /// Set a trusted CA certificate
     pub fn with_root_ca(mut self, root_ca: impl Into<String>) -> Self {
@@ -811,9 +806,7 @@ mod tests {
             user_agent
         );
         assert_eq!(
-            builder
-                .get_config_value(&ClientConfigKey::RootCa)
-                .unwrap(),
+            builder.get_config_value(&ClientConfigKey::RootCa).unwrap(),
             root_ca
         );
     }
