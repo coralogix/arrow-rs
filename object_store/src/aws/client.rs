@@ -687,7 +687,7 @@ mod tests {
     use quick_xml;
 
     #[test]
-    fn test_multipart_serializrtion() {
+    fn test_multipart_serialization() {
         let request = CompleteMultipart {
             part: vec![
                 MultipartPart {
