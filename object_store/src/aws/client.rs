@@ -42,6 +42,7 @@ use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     Client as ReqwestClient, Method, Response, StatusCode,
 };
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
 use std::collections::HashMap;
@@ -682,6 +683,8 @@ fn encode_path(path: &Path) -> PercentEncode<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::aws::client::{CompleteMultipart, MultipartPart};
+    use quick_xml;
 
     #[test]
     fn test_multipart_serializrtion() {
