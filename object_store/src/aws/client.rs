@@ -18,7 +18,8 @@
 use crate::aws::checksum::Checksum;
 use crate::aws::credential::{AwsCredential, CredentialExt};
 use crate::aws::{
-    AwsCredentialProvider, S3CopyIfNotExists, STORE, STRICT_ENCODE_SET, STRICT_PATH_ENCODE_SET,
+    AwsCredentialProvider, S3CopyIfNotExists, STORE, STRICT_ENCODE_SET,
+    STRICT_PATH_ENCODE_SET,
 };
 use crate::client::get::GetClient;
 use crate::client::list::ListClient;
@@ -152,12 +153,22 @@ struct CompleteMultipart {
     part: Vec<MultipartPart>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct MultipartPart {
-    #[serde(rename = "ETag")]
     e_tag: String,
-    #[serde(rename = "PartNumber")]
     part_number: usize,
+}
+
+impl Serialize for MultipartPart {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("MultipartPart", 2)?;
+        s.serialize_field("ETag", format!("\"{}\"", &self.e_tag).as_str())?;
+        s.serialize_field("PartNumber", &self.part_number)?;
+        s.end()
+    }
 }
 
 #[derive(Deserialize)]
@@ -667,4 +678,35 @@ impl ListClient for S3Client {
 
 fn encode_path(path: &Path) -> PercentEncode<'_> {
     utf8_percent_encode(path.as_ref(), &STRICT_PATH_ENCODE_SET)
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_multipart_serializrtion() {
+        let request = CompleteMultipart {
+            part: vec![
+                MultipartPart {
+                    e_tag: "1".to_string(),
+                    part_number: 1,
+                },
+                MultipartPart {
+                    e_tag: "2".to_string(),
+                    part_number: 2,
+                },
+                MultipartPart {
+                    e_tag: "3".to_string(),
+                    part_number: 3,
+                },
+            ],
+        };
+
+        let body = quick_xml::se::to_string(&request).unwrap();
+
+        assert_eq!(
+            body,
+            r#"<CompleteMultipartUpload><Part><ETag>"1"</ETag><PartNumber>1</PartNumber></Part><Part><ETag>"2"</ETag><PartNumber>2</PartNumber></Part><Part><ETag>"3"</ETag><PartNumber>3</PartNumber></Part></CompleteMultipartUpload>"#
+        )
+    }
 }
