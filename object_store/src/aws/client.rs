@@ -165,7 +165,7 @@ impl Serialize for MultipartPart {
     where
         S: serde::Serializer,
     {
-        let mut s = serializer.serialize_struct("MultipartPart", 2)?;
+        let mut s = serializer.serialize_struct("Part", 2)?;
         s.serialize_field("ETag", format!("\"{}\"", &self.e_tag).as_str())?;
         s.serialize_field("PartNumber", &self.part_number)?;
         s.end()
