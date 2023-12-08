@@ -214,7 +214,10 @@ impl AmazonS3 {
 #[async_trait]
 impl ObjectStore for AmazonS3 {
     async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
-        self.client.put_request(location, bytes, &(), None).await.map(|_| ())
+        self.client
+            .put_request(location, bytes, &(), None)
+            .await
+            .map(|_| ())
     }
 
     async fn put_opts(
@@ -224,9 +227,7 @@ impl ObjectStore for AmazonS3 {
         options: PutOptions,
     ) -> Result<()> {
         if options.tags.is_empty() {
-            self.client
-                .put_request(location, bytes, &(), None)
-                .await?;
+            self.client.put_request(location, bytes, &(), None).await?;
         } else {
             self.client
                 .put_request(location, bytes, &(), Some(&options.tags))

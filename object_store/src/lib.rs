@@ -273,7 +273,10 @@ pub mod throttle;
 mod client;
 
 #[cfg(feature = "cloud")]
-pub use client::{backoff::BackoffConfig, retry::RetryConfig, CredentialProvider, ClientConfigKey, ClientOptions};
+pub use client::{
+    backoff::BackoffConfig, retry::RetryConfig, ClientConfigKey, ClientOptions,
+    CredentialProvider,
+};
 use std::collections::HashMap;
 
 #[cfg(feature = "cloud")]

@@ -594,7 +594,6 @@ pub struct StaticCredentialProvider<T> {
 }
 
 impl<T> StaticCredentialProvider<T> {
-
     /// A [`CredentialProvider`] for a static credential of type `T`
     #[allow(dead_code)]
     pub fn new(credential: T) -> Self {
