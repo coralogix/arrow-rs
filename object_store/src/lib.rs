@@ -273,7 +273,10 @@ pub mod throttle;
 mod client;
 
 #[cfg(feature = "cloud")]
-pub use client::{backoff::BackoffConfig, retry::RetryConfig, CredentialProvider, ClientConfigKey, ClientOptions};
+pub use client::{
+    backoff::BackoffConfig, retry::RetryConfig, ClientConfigKey, ClientOptions,
+    CredentialProvider,
+};
 use std::collections::HashMap;
 
 #[cfg(feature = "cloud")]
@@ -1255,12 +1258,12 @@ mod tests {
 
             let expected: Vec<_> = files
                 .iter()
-                .cloned()
                 .filter(|x| {
                     let prefix_match =
                         prefix.as_ref().map(|p| x.prefix_matches(p)).unwrap_or(true);
-                    prefix_match && x > &offset
+                    prefix_match && (x > &&offset)
                 })
+                .cloned()
                 .collect();
 
             assert_eq!(actual, expected, "{prefix:?} - {offset:?}");
