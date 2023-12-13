@@ -21,6 +21,7 @@ use crate::path::Path;
 use crate::{ListResult, ObjectMeta, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -112,12 +113,22 @@ impl From<Vec<PartId>> for CompleteMultipartUpload {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 pub struct MultipartPart {
-    #[serde(rename = "ETag")]
     pub e_tag: String,
-    #[serde(rename = "PartNumber")]
     pub part_number: usize,
+}
+
+impl Serialize for MultipartPart {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut s = serializer.serialize_struct("Part", 2)?;
+        s.serialize_field("ETag", format!("\"{}\"", &self.e_tag).as_str())?;
+        s.serialize_field("PartNumber", &self.part_number)?;
+        s.end()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,4 +136,37 @@ pub struct MultipartPart {
 pub struct CompleteMultipartUploadResult {
     #[serde(rename = "ETag")]
     pub e_tag: String,
+}
+
+cfg(test)]
+mod tests {
+    use crate::aws::client::{CompleteMultipart, MultipartPart};
+    use quick_xml;
+
+    #[test]
+    fn test_multipart_serialization() {
+        let request = CompleteMultipart {
+            part: vec![
+                MultipartPart {
+                    e_tag: "1".to_string(),
+                    part_number: 1,
+                },
+                MultipartPart {
+                    e_tag: "2".to_string(),
+                    part_number: 2,
+                },
+                MultipartPart {
+                    e_tag: "3".to_string(),
+                    part_number: 3,
+                },
+            ],
+        };
+
+        let body = quick_xml::se::to_string(&request).unwrap();
+
+        assert_eq!(
+            body,
+            r#"<CompleteMultipartUpload><Part><ETag>"1"</ETag><PartNumber>1</PartNumber></Part><Part><ETag>"2"</ETag><PartNumber>2</PartNumber></Part><Part><ETag>"3"</ETag><PartNumber>3</PartNumber></Part></CompleteMultipartUpload>"#
+        )
+    }
 }
