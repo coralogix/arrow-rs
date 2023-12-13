@@ -432,7 +432,6 @@ where
             )),
         }
     }
-
     /// Reads a new page and set up the decoders for levels, values or dictionary.
     /// Returns false if there's no page left.
     fn read_new_page(&mut self) -> Result<bool> {
@@ -575,12 +574,13 @@ where
     /// If the current page is fully decoded, this will NOT load the next page
     /// into the buffer
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn peek_next(&mut self) -> Result<bool> {
         if self.num_buffered_values == 0 || self.num_buffered_values == self.num_decoded_values {
             // TODO: should we return false if read_new_page() = true and
             // num_buffered_values = 0?
             match self.page_reader.peek_next_page()? {
-                Some(next_page) => Ok(next_page.num_rows != 0),
+                Some(next_page) => Ok(next_page.num_rows.map_or(false, |f| f == 0)),
                 None => Ok(false),
             }
         } else {
