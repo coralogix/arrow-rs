@@ -138,7 +138,7 @@ pub struct CompleteMultipartUploadResult {
     pub e_tag: String,
 }
 
-[cfg(test)]
+#[cfg(test)]
 mod tests {
     use crate::aws::client::{CompleteMultipart, MultipartPart};
     use quick_xml;
