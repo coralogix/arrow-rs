@@ -28,6 +28,7 @@ use arrow_data::ArrayData;
 use arrow_schema::{DataType, Field, Fields};
 use std::sync::Arc;
 
+#[allow(unused)]
 fn create_decimal_array(array: Vec<Option<i128>>, precision: u8, scale: i8) -> Decimal128Array {
     array
         .into_iter()
@@ -973,6 +974,14 @@ fn test_extend_nulls_panic() {
     let int = Int32Array::from(vec![1, 2, 3, 4]).into_data();
     let mut mutable = MutableArrayData::new(vec![&int], false, 4);
     mutable.extend_nulls(2);
+}
+
+#[test]
+#[should_panic(expected = "Arrays with inconsistent types passed to MutableArrayData")]
+fn test_mixed_types() {
+    let a = StringArray::from(vec!["abc", "def"]).to_data();
+    let b = Int32Array::from(vec![1, 2, 3]).to_data();
+    MutableArrayData::new(vec![&a, &b], false, 4);
 }
 
 /*

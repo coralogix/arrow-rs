@@ -17,6 +17,8 @@
 
 //! Contains column reader API.
 
+use bytes::Bytes;
+
 use super::page::{Page, PageReader};
 use crate::basic::*;
 use crate::column::reader::decoder::{
@@ -27,7 +29,6 @@ use crate::data_type::*;
 use crate::errors::{ParquetError, Result};
 use crate::schema::types::ColumnDescPtr;
 use crate::util::bit_util::{ceil, num_required_bits, read_num_bytes};
-use crate::util::memory::ByteBufferPtr;
 
 pub(crate) mod decoder;
 
@@ -431,7 +432,6 @@ where
             )),
         }
     }
-
     /// Reads a new page and set up the decoders for levels, values or dictionary.
     /// Returns false if there's no page left.
     fn read_new_page(&mut self) -> Result<bool> {
@@ -474,7 +474,7 @@ where
                                     max_rep_level,
                                     num_values,
                                     rep_level_encoding,
-                                    buf.start_from(offset),
+                                    buf.slice(offset..),
                                 )?;
                                 offset += bytes_read;
 
@@ -492,7 +492,7 @@ where
                                     max_def_level,
                                     num_values,
                                     def_level_encoding,
-                                    buf.start_from(offset),
+                                    buf.slice(offset..),
                                 )?;
                                 offset += bytes_read;
 
@@ -504,7 +504,7 @@ where
 
                             self.values_decoder.set_data(
                                 encoding,
-                                buf.start_from(offset),
+                                buf.slice(offset..),
                                 num_values as usize,
                                 None,
                             )?;
@@ -540,7 +540,7 @@ where
 
                                 self.rep_level_decoder.as_mut().unwrap().set_data(
                                     Encoding::RLE,
-                                    buf.range(0, rep_levels_byte_len as usize),
+                                    buf.slice(..rep_levels_byte_len as usize),
                                 );
                             }
 
@@ -549,18 +549,16 @@ where
                             if self.descr.max_def_level() > 0 {
                                 self.def_level_decoder.as_mut().unwrap().set_data(
                                     Encoding::RLE,
-                                    buf.range(
-                                        rep_levels_byte_len as usize,
-                                        def_levels_byte_len as usize,
+                                    buf.slice(
+                                        rep_levels_byte_len as usize
+                                            ..(rep_levels_byte_len + def_levels_byte_len) as usize,
                                     ),
                                 );
                             }
 
                             self.values_decoder.set_data(
                                 encoding,
-                                buf.start_from(
-                                    (rep_levels_byte_len + def_levels_byte_len) as usize,
-                                ),
+                                buf.slice((rep_levels_byte_len + def_levels_byte_len) as usize..),
                                 num_values as usize,
                                 Some((num_values - num_nulls) as usize),
                             )?;
@@ -569,6 +567,24 @@ where
                     };
                 }
             }
+        }
+    }
+
+    /// Check whether there is more data to read from this column,
+    /// If the current page is fully decoded, this will NOT load the next page
+    /// into the buffer
+    #[inline]
+    #[allow(dead_code)]
+    pub(crate) fn peek_next(&mut self) -> Result<bool> {
+        if self.num_buffered_values == 0 || self.num_buffered_values == self.num_decoded_values {
+            // TODO: should we return false if read_new_page() = true and
+            // num_buffered_values = 0?
+            match self.page_reader.peek_next_page()? {
+                Some(next_page) => Ok(next_page.num_rows.map_or(false, |f| f == 0)),
+                None => Ok(false),
+            }
+        } else {
+            Ok(true)
         }
     }
 
@@ -595,21 +611,21 @@ fn parse_v1_level(
     max_level: i16,
     num_buffered_values: u32,
     encoding: Encoding,
-    buf: ByteBufferPtr,
-) -> Result<(usize, ByteBufferPtr)> {
+    buf: Bytes,
+) -> Result<(usize, Bytes)> {
     match encoding {
         Encoding::RLE => {
             let i32_size = std::mem::size_of::<i32>();
             let data_size = read_num_bytes::<i32>(i32_size, buf.as_ref()) as usize;
-            Ok((i32_size + data_size, buf.range(i32_size, data_size)))
+            Ok((
+                i32_size + data_size,
+                buf.slice(i32_size..i32_size + data_size),
+            ))
         }
         Encoding::BIT_PACKED => {
             let bit_width = num_required_bits(max_level as u64);
-            let num_bytes = ceil(
-                (num_buffered_values as usize * bit_width as usize) as i64,
-                8,
-            ) as usize;
-            Ok((num_bytes, buf.range(0, num_bytes)))
+            let num_bytes = ceil(num_buffered_values as usize * bit_width as usize, 8);
+            Ok((num_bytes, buf.slice(..num_bytes)))
         }
         _ => Err(general_err!("invalid level encoding: {}", encoding)),
     }

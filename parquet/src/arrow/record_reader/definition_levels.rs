@@ -20,6 +20,7 @@ use std::ops::Range;
 use arrow_array::builder::BooleanBufferBuilder;
 use arrow_buffer::bit_chunk_iterator::UnalignedBitChunk;
 use arrow_buffer::Buffer;
+use bytes::Bytes;
 
 use crate::arrow::buffer::bit_util::count_set_bits;
 use crate::basic::Encoding;
@@ -28,14 +29,11 @@ use crate::column::reader::decoder::{
 };
 use crate::errors::{ParquetError, Result};
 use crate::schema::types::ColumnDescPtr;
-use crate::util::memory::ByteBufferPtr;
-
-use super::buffer::ScalarBuffer;
 
 enum BufferInner {
     /// Compute levels and null mask
     Full {
-        levels: ScalarBuffer<i16>,
+        levels: Vec<i16>,
         nulls: BooleanBufferBuilder,
         max_level: i16,
     },
@@ -77,7 +75,7 @@ impl DefinitionLevelBuffer {
                 }
             }
             false => BufferInner::Full {
-                levels: ScalarBuffer::new(),
+                levels: Vec::new(),
                 nulls: BooleanBufferBuilder::new(0),
                 max_level: desc.max_def_level(),
             },
@@ -89,7 +87,7 @@ impl DefinitionLevelBuffer {
     /// Returns the built level data
     pub fn consume_levels(&mut self) -> Option<Buffer> {
         match &mut self.inner {
-            BufferInner::Full { levels, .. } => Some(std::mem::take(levels).into()),
+            BufferInner::Full { levels, .. } => Some(Buffer::from_vec(std::mem::take(levels))),
             BufferInner::Mask { .. } => None,
         }
     }
@@ -152,7 +150,7 @@ impl DefinitionLevelBufferDecoder {
 impl ColumnLevelDecoder for DefinitionLevelBufferDecoder {
     type Slice = DefinitionLevelBuffer;
 
-    fn set_data(&mut self, encoding: Encoding, data: ByteBufferPtr) {
+    fn set_data(&mut self, encoding: Encoding, data: Bytes) {
         match &mut self.decoder {
             MaybePacked::Packed(d) => d.set_data(encoding, data),
             MaybePacked::Fallback(d) => d.set_data(encoding, data),
@@ -174,9 +172,9 @@ impl DefinitionLevelDecoder for DefinitionLevelBufferDecoder {
                 assert_eq!(self.max_level, *max_level);
                 assert_eq!(range.start + writer.len, nulls.len());
 
-                levels.resize(range.end + writer.len);
+                levels.resize(range.end + writer.len, 0);
 
-                let slice = &mut levels.as_slice_mut()[writer.len..];
+                let slice = &mut levels[writer.len..];
                 let levels_read = decoder.read_def_levels(slice, range.clone())?;
 
                 nulls.reserve(levels_read);
@@ -219,7 +217,7 @@ impl DefinitionLevelDecoder for DefinitionLevelBufferDecoder {
 /// [RLE]: https://github.com/apache/parquet-format/blob/master/Encodings.md#run-length-encoding--bit-packing-hybrid-rle--3
 /// [BIT_PACKED]: https://github.com/apache/parquet-format/blob/master/Encodings.md#bit-packed-deprecated-bit_packed--4
 struct PackedDecoder {
-    data: ByteBufferPtr,
+    data: Bytes,
     data_offset: usize,
     rle_left: usize,
     rle_value: bool,
@@ -278,7 +276,7 @@ impl PackedDecoder {
 impl PackedDecoder {
     fn new() -> Self {
         Self {
-            data: ByteBufferPtr::new(vec![]),
+            data: Bytes::from(vec![]),
             data_offset: 0,
             rle_left: 0,
             rle_value: false,
@@ -287,7 +285,7 @@ impl PackedDecoder {
         }
     }
 
-    fn set_data(&mut self, encoding: Encoding, data: ByteBufferPtr) {
+    fn set_data(&mut self, encoding: Encoding, data: Bytes) {
         self.rle_left = 0;
         self.rle_value = false;
         self.packed_offset = 0;
@@ -385,7 +383,7 @@ mod tests {
 
         let encoded = encoder.consume();
         let mut decoder = PackedDecoder::new();
-        decoder.set_data(Encoding::RLE, ByteBufferPtr::new(encoded));
+        decoder.set_data(Encoding::RLE, encoded.into());
 
         // Decode data in random length intervals
         let mut decoded = BooleanBufferBuilder::new(len);
@@ -424,7 +422,7 @@ mod tests {
 
         let encoded = encoder.consume();
         let mut decoder = PackedDecoder::new();
-        decoder.set_data(Encoding::RLE, ByteBufferPtr::new(encoded));
+        decoder.set_data(Encoding::RLE, encoded.into());
 
         let mut skip_value = 0;
         let mut read_value = 0;

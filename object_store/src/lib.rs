@@ -119,6 +119,7 @@
 //! application complexity.
 //!
 //! ```no_run
+//! # #[cfg(feature = "aws")] {
 //! # use url::Url;
 //! # use object_store::{parse_url, parse_url_opts};
 //! # use object_store::aws::{AmazonS3, AmazonS3Builder};
@@ -140,6 +141,7 @@
 //! let url = Url::parse("https://ACCOUNT_ID.r2.cloudflarestorage.com/bucket/path").unwrap();
 //! let (store, path) = parse_url(&url).unwrap();
 //! assert_eq!(path.as_ref(), "path");
+//! # }
 //! ```
 //!
 //! [PyArrow FileSystem]: https://arrow.apache.org/docs/python/generated/pyarrow.fs.FileSystem.html#pyarrow.fs.FileSystem.from_uri
@@ -435,6 +437,17 @@
 //! [Optimistic Concurrency Control]: https://en.wikipedia.org/wiki/Optimistic_concurrency_control
 //! [Apache Iceberg]: https://iceberg.apache.org/
 //! [Delta Lake]: https://delta.io/
+//!
+//! # TLS Certificates
+//!
+//! Stores that use HTTPS/TLS (this is true for most cloud stores) can choose the source of their [CA]
+//! certificates. By default the system-bundled certificates are used (see
+//! [`rustls-native-certs`]). The `tls-webpki-roots` feature switch can be used to also bundle Mozilla's
+//! root certificates with the library/application (see [`webpki-roots`]).
+//!
+//! [CA]: https://en.wikipedia.org/wiki/Certificate_authority
+//! [`rustls-native-certs`]: https://crates.io/crates/rustls-native-certs/
+//! [`webpki-roots`]: https://crates.io/crates/webpki-roots
 //!
 
 #[cfg(all(
@@ -1225,13 +1238,10 @@ mod tests {
     use tokio::io::AsyncWriteExt;
 
     pub(crate) async fn put_get_delete_list(storage: &DynObjectStore) {
-        put_get_delete_list_opts(storage, false).await
+        put_get_delete_list_opts(storage).await
     }
 
-    pub(crate) async fn put_get_delete_list_opts(
-        storage: &DynObjectStore,
-        skip_list_with_spaces: bool,
-    ) {
+    pub(crate) async fn put_get_delete_list_opts(storage: &DynObjectStore) {
         delete_fixtures(storage).await;
 
         let content_list = flatten_list_stream(storage, None).await.unwrap();
@@ -1472,12 +1482,11 @@ mod tests {
         storage.put(&path, Bytes::from(vec![0, 1])).await.unwrap();
         storage.head(&path).await.unwrap();
 
-        if !skip_list_with_spaces {
-            let files = flatten_list_stream(storage, Some(&Path::from("foo bar")))
-                .await
-                .unwrap();
-            assert_eq!(files, vec![path.clone()]);
-        }
+        let files = flatten_list_stream(storage, Some(&Path::from("foo bar")))
+            .await
+            .unwrap();
+        assert_eq!(files, vec![path.clone()]);
+
         storage.delete(&path).await.unwrap();
 
         let files = flatten_list_stream(storage, None).await.unwrap();
@@ -1524,11 +1533,11 @@ mod tests {
 
             let expected: Vec<_> = files
                 .iter()
-                .cloned()
                 .filter(|x| {
                     let prefix_match = prefix.as_ref().map(|p| x.prefix_matches(p)).unwrap_or(true);
-                    prefix_match && x > &offset
+                    prefix_match && *x > &offset
                 })
+                .cloned()
                 .collect();
 
             assert_eq!(actual, expected, "{prefix:?} - {offset:?}");
