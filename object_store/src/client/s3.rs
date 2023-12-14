@@ -140,7 +140,7 @@ pub struct CompleteMultipartUploadResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::aws::client::{CompleteMultipartUpload, MultipartPart};
+    use super::{CompleteMultipartUpload, MultipartPart};
     use quick_xml;
 
     #[test]
