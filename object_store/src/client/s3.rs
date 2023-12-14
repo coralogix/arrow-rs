@@ -140,12 +140,12 @@ pub struct CompleteMultipartUploadResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::aws::client::{CompleteMultipart, MultipartPart};
+    use crate::aws::client::{CompleteMultipartUpload, MultipartPart};
     use quick_xml;
 
     #[test]
     fn test_multipart_serialization() {
-        let request = CompleteMultipart {
+        let request = CompleteMultipartUpload {
             part: vec![
                 MultipartPart {
                     e_tag: "1".to_string(),
