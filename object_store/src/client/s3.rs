@@ -20,8 +20,8 @@ use crate::multipart::PartId;
 use crate::path::Path;
 use crate::{ListResult, ObjectMeta, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
