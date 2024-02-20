@@ -116,6 +116,13 @@ impl<T: ByteArrayType> GenericByteBuilder<T> {
         self.offsets_builder.append(self.next_offset());
     }
 
+    /// Append a null value into the builder.
+    #[inline]
+    pub fn append_n_nulls(&mut self, n: usize) {
+        self.null_buffer_builder.append_n_nulls(n);
+        self.offsets_builder.append_n(n, self.next_offset());
+    }
+
     /// Builds the [`GenericByteArray`] and reset this builder.
     pub fn finish(&mut self) -> GenericByteArray<T> {
         let array_type = T::DATA_TYPE;
