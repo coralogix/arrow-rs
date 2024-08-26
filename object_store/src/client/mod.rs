@@ -220,6 +220,7 @@ impl Default for ClientOptions {
             http2_keep_alive_while_idle: Default::default(),
             http1_only: Default::default(),
             http2_only: Default::default(),
+            root_ca: None,
         }
     }
 }
