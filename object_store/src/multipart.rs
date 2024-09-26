@@ -15,198 +15,70 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Cloud Multipart Upload
+//!
+//! This crate provides an asynchronous interface for multipart file uploads to
+//! cloud storage services. It's designed to offer efficient, non-blocking operations,
+//! especially useful when dealing with large files or high-throughput systems.
+
 use async_trait::async_trait;
-use futures::{stream::FuturesUnordered, Future, StreamExt};
-use std::{io, pin::Pin, sync::Arc, task::Poll};
-use tokio::io::AsyncWrite;
 
-use crate::Result;
+use crate::path::Path;
+use crate::{MultipartId, PutPayload, PutResult, Result};
 
-type BoxedTryFuture<T> = Pin<Box<dyn Future<Output = Result<T, io::Error>> + Send>>;
-
-/// A trait that can be implemented by cloud-based object stores
-/// and used in combination with [`CloudMultiPartUpload`] to provide
-/// multipart upload support
-#[async_trait]
-pub(crate) trait CloudMultiPartUploadImpl: 'static {
-    /// Upload a single part
-    async fn put_multipart_part(
-        &self,
-        buf: Vec<u8>,
-        part_idx: usize,
-    ) -> Result<UploadPart, io::Error>;
-
-    /// Complete the upload with the provided parts
-    ///
-    /// `completed_parts` is in order of part number
-    async fn complete(&self, completed_parts: Vec<UploadPart>) -> Result<(), io::Error>;
-}
-
+/// Represents a part of a file that has been successfully uploaded in a multipart upload process.
 #[derive(Debug, Clone)]
-pub(crate) struct UploadPart {
+pub struct PartId {
+    /// Id of this part
     pub content_id: String,
 }
 
-pub(crate) struct CloudMultiPartUpload<T>
-where
-    T: CloudMultiPartUploadImpl,
-{
-    inner: Arc<T>,
-    /// A list of completed parts, in sequential order.
-    completed_parts: Vec<Option<UploadPart>>,
-    /// Part upload tasks currently running
-    tasks: FuturesUnordered<BoxedTryFuture<(usize, UploadPart)>>,
-    /// Maximum number of upload tasks to run concurrently
-    max_concurrency: usize,
-    /// Buffer that will be sent in next upload.
-    current_buffer: Vec<u8>,
-    /// Minimum size of a part in bytes
-    min_part_size: usize,
-    /// Index of current part
-    current_part_idx: usize,
-    /// The completion task
-    completion_task: Option<BoxedTryFuture<()>>,
-}
+/// A low-level interface for interacting with multipart upload APIs
+///
+/// Most use-cases should prefer [`ObjectStore::put_multipart`] as this is supported by more
+/// backends, including [`LocalFileSystem`], and automatically handles uploading fixed
+/// size parts of sufficient size in parallel
+///
+/// [`ObjectStore::put_multipart`]: crate::ObjectStore::put_multipart
+/// [`LocalFileSystem`]: crate::local::LocalFileSystem
+#[async_trait]
+pub trait MultipartStore: Send + Sync + 'static {
+    /// Creates a new multipart upload, returning the [`MultipartId`]
+    async fn create_multipart(&self, path: &Path) -> Result<MultipartId>;
 
-impl<T> CloudMultiPartUpload<T>
-where
-    T: CloudMultiPartUploadImpl,
-{
-    pub fn new(inner: T, max_concurrency: usize) -> Self {
-        Self {
-            inner: Arc::new(inner),
-            completed_parts: Vec::new(),
-            tasks: FuturesUnordered::new(),
-            max_concurrency,
-            current_buffer: Vec::new(),
-            // TODO: Should self vary by provider?
-            // TODO: Should we automatically increase then when part index gets large?
-            min_part_size: 5_000_000,
-            current_part_idx: 0,
-            completion_task: None,
-        }
-    }
+    /// Uploads a new part with index `part_idx`
+    ///
+    /// `part_idx` should be an integer in the range `0..N` where `N` is the number of
+    /// parts in the upload. Parts may be uploaded concurrently and in any order.
+    ///
+    /// Most stores require that all parts excluding the last are at least 5 MiB, and some
+    /// further require that all parts excluding the last be the same size, e.g. [R2].
+    /// [`WriteMultipart`] performs writes in fixed size blocks of 5 MiB, and clients wanting
+    /// to maximise compatibility should look to do likewise.
+    ///
+    /// [R2]: https://developers.cloudflare.com/r2/objects/multipart-objects/#limitations
+    /// [`WriteMultipart`]: crate::upload::WriteMultipart
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> Result<PartId>;
 
-    pub fn poll_tasks(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Result<(), io::Error> {
-        if self.tasks.is_empty() {
-            return Ok(());
-        }
-        let total_parts = self.completed_parts.len();
-        while let Poll::Ready(Some(res)) = self.tasks.poll_next_unpin(cx) {
-            let (part_idx, part) = res?;
-            self.completed_parts
-                .resize(std::cmp::max(part_idx + 1, total_parts), None);
-            self.completed_parts[part_idx] = Some(part);
-        }
-        Ok(())
-    }
-}
+    /// Completes a multipart upload
+    ///
+    /// The `i`'th value of `parts` must be a [`PartId`] returned by a call to [`Self::put_part`]
+    /// with a `part_idx` of `i`, and the same `path` and `id` as provided to this method. Calling
+    /// this method with out of sequence or repeated [`PartId`], or [`PartId`] returned for other
+    /// values of `path` or `id`, will result in implementation-defined behaviour
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> Result<PutResult>;
 
-impl<T> AsyncWrite for CloudMultiPartUpload<T>
-where
-    T: CloudMultiPartUploadImpl + Send + Sync,
-{
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<Result<usize, io::Error>> {
-        // Poll current tasks
-        self.as_mut().poll_tasks(cx)?;
-
-        // If adding buf to pending buffer would trigger send, check
-        // whether we have capacity for another task.
-        let enough_to_send = (buf.len() + self.current_buffer.len()) > self.min_part_size;
-        if enough_to_send && self.tasks.len() < self.max_concurrency {
-            // If we do, copy into the buffer and submit the task, and return ready.
-            self.current_buffer.extend_from_slice(buf);
-
-            let out_buffer = std::mem::take(&mut self.current_buffer);
-            let inner = Arc::clone(&self.inner);
-            let part_idx = self.current_part_idx;
-            self.tasks.push(Box::pin(async move {
-                let upload_part = inner.put_multipart_part(out_buffer, part_idx).await?;
-                Ok((part_idx, upload_part))
-            }));
-            self.current_part_idx += 1;
-
-            // We need to poll immediately after adding to setup waker
-            self.as_mut().poll_tasks(cx)?;
-
-            Poll::Ready(Ok(buf.len()))
-        } else if !enough_to_send {
-            self.current_buffer.extend_from_slice(buf);
-            Poll::Ready(Ok(buf.len()))
-        } else {
-            // Waker registered by call to poll_tasks at beginning
-            Poll::Pending
-        }
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), io::Error>> {
-        // Poll current tasks
-        self.as_mut().poll_tasks(cx)?;
-
-        // If current_buffer is not empty, see if it can be submitted
-        if !self.current_buffer.is_empty() && self.tasks.len() < self.max_concurrency {
-            let out_buffer: Vec<u8> = std::mem::take(&mut self.current_buffer);
-            let inner = Arc::clone(&self.inner);
-            let part_idx = self.current_part_idx;
-            self.tasks.push(Box::pin(async move {
-                let upload_part = inner.put_multipart_part(out_buffer, part_idx).await?;
-                Ok((part_idx, upload_part))
-            }));
-        }
-
-        self.as_mut().poll_tasks(cx)?;
-
-        // If tasks and current_buffer are empty, return Ready
-        if self.tasks.is_empty() && self.current_buffer.is_empty() {
-            Poll::Ready(Ok(()))
-        } else {
-            Poll::Pending
-        }
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), io::Error>> {
-        // First, poll flush
-        match self.as_mut().poll_flush(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(res) => res?,
-        };
-
-        // If shutdown task is not set, set it
-        let parts = std::mem::take(&mut self.completed_parts);
-        let parts = parts
-            .into_iter()
-            .enumerate()
-            .map(|(idx, part)| {
-                part.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("Missing information for upload part {}", idx),
-                    )
-                })
-            })
-            .collect::<Result<_, _>>()?;
-
-        let inner = Arc::clone(&self.inner);
-        let completion_task = self.completion_task.get_or_insert_with(|| {
-            Box::pin(async move {
-                inner.complete(parts).await?;
-                Ok(())
-            })
-        });
-
-        Pin::new(completion_task).poll(cx)
-    }
+    /// Aborts a multipart upload
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> Result<()>;
 }

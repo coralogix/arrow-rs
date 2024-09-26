@@ -5,6 +5,7 @@ rusty-tags.vi
 .flatbuffers/
 .idea/
 .vscode
+.devcontainer
 venv/*
 # created by doctests
 parquet/data.parquet
@@ -14,13 +15,14 @@ parquet/data.parquet
 justfile
 .prettierignore
 .env
+.editorconfig
 # local azurite file
 __azurite*
 __blobstorage__
 
 # .bak files
 *.bak
-
+*.bak2
 # OS-specific .gitignores
 
 # Mac .gitignore
@@ -92,3 +94,6 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 
+# Python virtual env in parquet crate
+parquet/pytest/venv/
+__pycache__/

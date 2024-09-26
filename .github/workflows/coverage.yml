@@ -17,6 +17,10 @@
 
 name: coverage
 
+concurrency:
+  group: ${{ github.repository }}-${{ github.head_ref || github.sha }}-${{ github.workflow }}
+  cancel-in-progress: true
+
 # Trigger only on pushes to master, not pull requests
 on:
   push:
@@ -32,7 +36,7 @@ jobs:
     # otherwise we get this error:
     # Failed to run tests: ASLR disable failed: EPERM: Operation not permitted
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
       - name: Setup Rust toolchain
@@ -47,7 +51,7 @@ jobs:
           curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v21.4/protoc-21.4-linux-x86_64.zip
           unzip protoc-21.4-linux-x86_64.zip
       - name: Cache Cargo
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: /home/runner/.cargo
           key: cargo-coverage-cache3-

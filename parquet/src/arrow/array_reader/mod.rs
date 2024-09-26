@@ -18,8 +18,8 @@
 //! Logic for reading into arrow arrays
 
 use crate::errors::Result;
-use arrow::array::ArrayRef;
-use arrow::datatypes::DataType as ArrowType;
+use arrow_array::ArrayRef;
+use arrow_schema::DataType as ArrowType;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -28,13 +28,14 @@ use crate::arrow::record_reader::GenericRecordReader;
 use crate::column::page::PageIterator;
 use crate::column::reader::decoder::ColumnValueDecoder;
 use crate::file::reader::{FilePageIterator, FileReader};
-use crate::schema::types::SchemaDescPtr;
 
 mod builder;
 mod byte_array;
 mod byte_array_dictionary;
+mod byte_view_array;
 mod empty_array;
 mod fixed_len_byte_array;
+mod fixed_size_list_array;
 mod list_array;
 mod map_array;
 mod null_array;
@@ -47,7 +48,11 @@ mod test_util;
 pub use builder::build_array_reader;
 pub use byte_array::make_byte_array_reader;
 pub use byte_array_dictionary::make_byte_array_dictionary_reader;
+#[allow(unused_imports)] // Only used for benchmarks
+pub use byte_view_array::make_byte_view_array_reader;
+#[allow(unused_imports)] // Only used for benchmarks
 pub use fixed_len_byte_array::make_fixed_len_byte_array_reader;
+pub use fixed_size_list_array::FixedSizeListArrayReader;
 pub use list_array::ListArrayReader;
 pub use map_array::MapArrayReader;
 pub use null_array::NullArrayReader;
@@ -56,12 +61,16 @@ pub use struct_array::StructArrayReader;
 
 /// Array reader reads parquet data into arrow array.
 pub trait ArrayReader: Send {
+    // TODO: this function is never used, and the trait is not public. Perhaps this should be
+    // removed.
+    #[allow(dead_code)]
     fn as_any(&self) -> &dyn Any;
 
     /// Returns the arrow type of this array reader.
     fn get_data_type(&self) -> &ArrowType;
 
     /// Reads at most `batch_size` records into an arrow array and return it.
+    #[cfg(any(feature = "experimental", test))]
     fn next_batch(&mut self, batch_size: usize) -> Result<ArrayRef> {
         self.read_records(batch_size)?;
         self.consume_batch()
@@ -98,75 +107,21 @@ pub trait ArrayReader: Send {
 }
 
 /// A collection of row groups
-pub trait RowGroupCollection {
-    /// Get schema of parquet file.
-    fn schema(&self) -> SchemaDescPtr;
-
-    /// Get the numer of rows in this collection
+pub trait RowGroups {
+    /// Get the number of rows in this collection
     fn num_rows(&self) -> usize;
 
-    /// Returns an iterator over the column chunks for particular column
+    /// Returns a [`PageIterator`] for the column chunks with the given leaf column index
     fn column_chunks(&self, i: usize) -> Result<Box<dyn PageIterator>>;
 }
 
-impl RowGroupCollection for Arc<dyn FileReader> {
-    fn schema(&self) -> SchemaDescPtr {
-        self.metadata().file_metadata().schema_descr_ptr()
-    }
-
+impl RowGroups for Arc<dyn FileReader> {
     fn num_rows(&self) -> usize {
         self.metadata().file_metadata().num_rows() as usize
     }
 
     fn column_chunks(&self, column_index: usize) -> Result<Box<dyn PageIterator>> {
         let iterator = FilePageIterator::new(column_index, Arc::clone(self))?;
-        Ok(Box::new(iterator))
-    }
-}
-
-pub(crate) struct FileReaderRowGroupCollection {
-    /// The underling file reader
-    reader: Arc<dyn FileReader>,
-    /// Optional list of row group indices to scan
-    row_groups: Option<Vec<usize>>,
-}
-
-impl FileReaderRowGroupCollection {
-    /// Creates a new [`RowGroupCollection`] from a `FileReader` and an optional
-    /// list of row group indexes to scan
-    pub fn new(reader: Arc<dyn FileReader>, row_groups: Option<Vec<usize>>) -> Self {
-        Self { reader, row_groups }
-    }
-}
-
-impl RowGroupCollection for FileReaderRowGroupCollection {
-    fn schema(&self) -> SchemaDescPtr {
-        self.reader.metadata().file_metadata().schema_descr_ptr()
-    }
-
-    fn num_rows(&self) -> usize {
-        match &self.row_groups {
-            None => self.reader.metadata().file_metadata().num_rows() as usize,
-            Some(row_groups) => {
-                let meta = self.reader.metadata().row_groups();
-                row_groups
-                    .iter()
-                    .map(|x| meta[*x].num_rows() as usize)
-                    .sum()
-            }
-        }
-    }
-
-    fn column_chunks(&self, i: usize) -> Result<Box<dyn PageIterator>> {
-        let iterator = match &self.row_groups {
-            Some(row_groups) => FilePageIterator::with_row_groups(
-                i,
-                Box::new(row_groups.clone().into_iter()),
-                Arc::clone(&self.reader),
-            )?,
-            None => FilePageIterator::new(i, Arc::clone(&self.reader))?,
-        };
-
         Ok(Box::new(iterator))
     }
 }
@@ -182,7 +137,7 @@ fn read_records<V, CV>(
 ) -> Result<usize>
 where
     V: ValuesBuffer,
-    CV: ColumnValueDecoder<Slice = V::Slice>,
+    CV: ColumnValueDecoder<Buffer = V>,
 {
     let mut records_read = 0usize;
     while records_read < batch_size {
@@ -205,7 +160,7 @@ where
     Ok(records_read)
 }
 
-/// Uses `record_reader` to skip up to `batch_size` records from`pages`
+/// Uses `record_reader` to skip up to `batch_size` records from `pages`
 ///
 /// Returns the number of records skipped, which can be less than `batch_size` if
 /// pages is exhausted
@@ -216,7 +171,7 @@ fn skip_records<V, CV>(
 ) -> Result<usize>
 where
     V: ValuesBuffer,
-    CV: ColumnValueDecoder<Slice = V::Slice>,
+    CV: ColumnValueDecoder<Buffer = V>,
 {
     let mut records_skipped = 0usize;
     while records_skipped < batch_size {

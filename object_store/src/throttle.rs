@@ -20,13 +20,16 @@ use parking_lot::Mutex;
 use std::ops::Range;
 use std::{convert::TryInto, sync::Arc};
 
-use crate::MultipartId;
-use crate::{path::Path, GetResult, ListResult, ObjectMeta, ObjectStore, Result};
+use crate::multipart::{MultipartStore, PartId};
+use crate::{
+    path::Path, GetResult, GetResultPayload, ListResult, MultipartId, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result,
+};
+use crate::{GetOptions, UploadPart};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{stream::BoxStream, StreamExt};
+use futures::{stream::BoxStream, FutureExt, StreamExt};
 use std::time::Duration;
-use tokio::io::AsyncWrite;
 
 /// Configuration settings for throttled store
 #[derive(Debug, Default, Clone, Copy)]
@@ -108,12 +111,12 @@ async fn sleep(duration: Duration) {
 /// **Note that the behavior of the wrapper is deterministic and might not reflect real-world
 /// conditions!**
 #[derive(Debug)]
-pub struct ThrottledStore<T: ObjectStore> {
+pub struct ThrottledStore<T> {
     inner: T,
     config: Arc<Mutex<ThrottleConfig>>,
 }
 
-impl<T: ObjectStore> ThrottledStore<T> {
+impl<T> ThrottledStore<T> {
     /// Create new wrapper with zero waiting times.
     pub fn new(inner: T, config: ThrottleConfig) -> Self {
         Self {
@@ -145,25 +148,39 @@ impl<T: ObjectStore> std::fmt::Display for ThrottledStore<T> {
 
 #[async_trait]
 impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
-    async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
+    async fn put(&self, location: &Path, payload: PutPayload) -> Result<PutResult> {
         sleep(self.config().wait_put_per_call).await;
-
-        self.inner.put(location, bytes).await
+        self.inner.put(location, payload).await
     }
 
-    async fn put_multipart(
+    async fn put_opts(
         &self,
-        _location: &Path,
-    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
-        Err(super::Error::NotImplemented)
+        location: &Path,
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<PutResult> {
+        sleep(self.config().wait_put_per_call).await;
+        self.inner.put_opts(location, payload, opts).await
     }
 
-    async fn abort_multipart(
+    async fn put_multipart(&self, location: &Path) -> Result<Box<dyn MultipartUpload>> {
+        let upload = self.inner.put_multipart(location).await?;
+        Ok(Box::new(ThrottledUpload {
+            upload,
+            sleep: self.config().wait_put_per_call,
+        }))
+    }
+
+    async fn put_multipart_opts(
         &self,
-        _location: &Path,
-        _multipart_id: &MultipartId,
-    ) -> Result<()> {
-        Err(super::Error::NotImplemented)
+        location: &Path,
+        opts: PutMultipartOpts,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        let upload = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(ThrottledUpload {
+            upload,
+            sleep: self.config().wait_put_per_call,
+        }))
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
@@ -172,44 +189,32 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         // need to copy to avoid moving / referencing `self`
         let wait_get_per_byte = self.config().wait_get_per_byte;
 
-        self.inner.get(location).await.map(|result| {
-            let s = match result {
-                GetResult::Stream(s) => s,
-                GetResult::File(_, _) => unimplemented!(),
-            };
+        let result = self.inner.get(location).await?;
+        Ok(throttle_get(result, wait_get_per_byte))
+    }
 
-            GetResult::Stream(
-                s.then(move |bytes_result| async move {
-                    match bytes_result {
-                        Ok(bytes) => {
-                            let bytes_len: u32 = usize_to_u32_saturate(bytes.len());
-                            sleep(wait_get_per_byte * bytes_len).await;
-                            Ok(bytes)
-                        }
-                        Err(err) => Err(err),
-                    }
-                })
-                .boxed(),
-            )
-        })
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        sleep(self.config().wait_get_per_call).await;
+
+        // need to copy to avoid moving / referencing `self`
+        let wait_get_per_byte = self.config().wait_get_per_byte;
+
+        let result = self.inner.get_opts(location, options).await?;
+        Ok(throttle_get(result, wait_get_per_byte))
     }
 
     async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
         let config = self.config();
 
-        let sleep_duration = config.wait_get_per_call
-            + config.wait_get_per_byte * (range.end - range.start) as u32;
+        let sleep_duration =
+            config.wait_get_per_call + config.wait_get_per_byte * (range.end - range.start) as u32;
 
         sleep(sleep_duration).await;
 
         self.inner.get_range(location, range).await
     }
 
-    async fn get_ranges(
-        &self,
-        location: &Path,
-        ranges: &[Range<usize>],
-    ) -> Result<Vec<Bytes>> {
+    async fn get_ranges(&self, location: &Path, ranges: &[Range<usize>]) -> Result<Vec<Bytes>> {
         let config = self.config();
 
         let total_bytes: usize = ranges.iter().map(|range| range.end - range.start).sum();
@@ -232,28 +237,30 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         self.inner.delete(location).await
     }
 
-    async fn list(
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta>> {
+        let stream = self.inner.list(prefix);
+        futures::stream::once(async move {
+            let wait_list_per_entry = self.config().wait_list_per_entry;
+            sleep(self.config().wait_list_per_call).await;
+            throttle_stream(stream, move |_| wait_list_per_entry)
+        })
+        .flatten()
+        .boxed()
+    }
+
+    fn list_with_offset(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        sleep(self.config().wait_list_per_call).await;
-
-        // need to copy to avoid moving / referencing `self`
-        let wait_list_per_entry = self.config().wait_list_per_entry;
-
-        self.inner.list(prefix).await.map(|stream| {
-            stream
-                .then(move |result| async move {
-                    match result {
-                        Ok(entry) => {
-                            sleep(wait_list_per_entry).await;
-                            Ok(entry)
-                        }
-                        Err(err) => Err(err),
-                    }
-                })
-                .boxed()
+        offset: &Path,
+    ) -> BoxStream<'_, Result<ObjectMeta>> {
+        let stream = self.inner.list_with_offset(prefix, offset);
+        futures::stream::once(async move {
+            let wait_list_per_entry = self.config().wait_list_per_entry;
+            sleep(self.config().wait_list_per_call).await;
+            throttle_stream(stream, move |_| wait_list_per_entry)
         })
+        .flatten()
+        .boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
@@ -262,8 +269,7 @@ impl<T: ObjectStore> ObjectStore for ThrottledStore<T> {
         match self.inner.list_with_delimiter(prefix).await {
             Ok(list_result) => {
                 let entries_len = usize_to_u32_saturate(list_result.objects.len());
-                sleep(self.config().wait_list_with_delimiter_per_entry * entries_len)
-                    .await;
+                sleep(self.config().wait_list_with_delimiter_per_entry * entries_len).await;
                 Ok(list_result)
             }
             Err(err) => Err(err),
@@ -300,17 +306,99 @@ fn usize_to_u32_saturate(x: usize) -> u32 {
     x.try_into().unwrap_or(u32::MAX)
 }
 
+fn throttle_get(result: GetResult, wait_get_per_byte: Duration) -> GetResult {
+    let s = match result.payload {
+        GetResultPayload::Stream(s) => s,
+        GetResultPayload::File(_, _) => unimplemented!(),
+    };
+
+    let stream = throttle_stream(s, move |bytes| {
+        let bytes_len: u32 = usize_to_u32_saturate(bytes.len());
+        wait_get_per_byte * bytes_len
+    });
+
+    GetResult {
+        payload: GetResultPayload::Stream(stream),
+        ..result
+    }
+}
+
+fn throttle_stream<T: Send + 'static, E: Send + 'static, F>(
+    stream: BoxStream<'_, Result<T, E>>,
+    delay: F,
+) -> BoxStream<'_, Result<T, E>>
+where
+    F: Fn(&T) -> Duration + Send + Sync + 'static,
+{
+    stream
+        .then(move |result| {
+            let delay = result.as_ref().ok().map(&delay).unwrap_or_default();
+            sleep(delay).then(|_| futures::future::ready(result))
+        })
+        .boxed()
+}
+
+#[async_trait]
+impl<T: MultipartStore> MultipartStore for ThrottledStore<T> {
+    async fn create_multipart(&self, path: &Path) -> Result<MultipartId> {
+        self.inner.create_multipart(path).await
+    }
+
+    async fn put_part(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        part_idx: usize,
+        data: PutPayload,
+    ) -> Result<PartId> {
+        sleep(self.config().wait_put_per_call).await;
+        self.inner.put_part(path, id, part_idx, data).await
+    }
+
+    async fn complete_multipart(
+        &self,
+        path: &Path,
+        id: &MultipartId,
+        parts: Vec<PartId>,
+    ) -> Result<PutResult> {
+        self.inner.complete_multipart(path, id, parts).await
+    }
+
+    async fn abort_multipart(&self, path: &Path, id: &MultipartId) -> Result<()> {
+        self.inner.abort_multipart(path, id).await
+    }
+}
+
+#[derive(Debug)]
+struct ThrottledUpload {
+    upload: Box<dyn MultipartUpload>,
+    sleep: Duration,
+}
+
+#[async_trait]
+impl MultipartUpload for ThrottledUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let duration = self.sleep;
+        let put = self.upload.put_part(data);
+        Box::pin(async move {
+            sleep(duration).await;
+            put.await
+        })
+    }
+
+    async fn complete(&mut self) -> Result<PutResult> {
+        self.upload.complete().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.upload.abort().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        memory::InMemory,
-        tests::{
-            copy_if_not_exists, list_uses_directories_correctly, list_with_delimiter,
-            put_get_delete_list, rename_and_copy,
-        },
-    };
-    use bytes::Bytes;
+    use crate::{integration::*, memory::InMemory, GetResultPayload};
     use futures::TryStreamExt;
     use tokio::time::Duration;
     use tokio::time::Instant;
@@ -341,6 +429,8 @@ mod tests {
         list_with_delimiter(&store).await;
         rename_and_copy(&store).await;
         copy_if_not_exists(&store).await;
+        stream_get(&store).await;
+        multipart(&store, &store).await;
     }
 
     #[tokio::test]
@@ -457,16 +547,12 @@ mod tests {
         assert_bounds!(measure_put(&store, 0).await, 0);
     }
 
-    async fn place_test_object(
-        store: &ThrottledStore<InMemory>,
-        n_bytes: Option<usize>,
-    ) -> Path {
+    async fn place_test_object(store: &ThrottledStore<InMemory>, n_bytes: Option<usize>) -> Path {
         let path = Path::from("foo");
 
         if let Some(n_bytes) = n_bytes {
             let data: Vec<_> = std::iter::repeat(1u8).take(n_bytes).collect();
-            let bytes = Bytes::from(data);
-            store.put(&path, bytes).await.unwrap();
+            store.put(&path, data.into()).await.unwrap();
         } else {
             // ensure object is absent
             store.delete(&path).await.unwrap();
@@ -476,20 +562,11 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    async fn place_test_objects(
-        store: &ThrottledStore<InMemory>,
-        n_entries: usize,
-    ) -> Path {
+    async fn place_test_objects(store: &ThrottledStore<InMemory>, n_entries: usize) -> Path {
         let prefix = Path::from("foo");
 
         // clean up store
-        let entries: Vec<_> = store
-            .list(Some(&prefix))
-            .await
-            .unwrap()
-            .try_collect()
-            .await
-            .unwrap();
+        let entries: Vec<_> = store.list(Some(&prefix)).try_collect().await.unwrap();
 
         for entry in entries {
             store.delete(&entry.location).await.unwrap();
@@ -498,18 +575,13 @@ mod tests {
         // create new entries
         for i in 0..n_entries {
             let path = prefix.child(i.to_string().as_str());
-
-            let data = Bytes::from("bar");
-            store.put(&path, data).await.unwrap();
+            store.put(&path, "bar".into()).await.unwrap();
         }
 
         prefix
     }
 
-    async fn measure_delete(
-        store: &ThrottledStore<InMemory>,
-        n_bytes: Option<usize>,
-    ) -> Duration {
+    async fn measure_delete(store: &ThrottledStore<InMemory>, n_bytes: Option<usize>) -> Duration {
         let path = place_test_object(store, n_bytes).await;
 
         let t0 = Instant::now();
@@ -519,19 +591,16 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    async fn measure_get(
-        store: &ThrottledStore<InMemory>,
-        n_bytes: Option<usize>,
-    ) -> Duration {
+    async fn measure_get(store: &ThrottledStore<InMemory>, n_bytes: Option<usize>) -> Duration {
         let path = place_test_object(store, n_bytes).await;
 
         let t0 = Instant::now();
         let res = store.get(&path).await;
         if n_bytes.is_some() {
             // need to consume bytes to provoke sleep times
-            let s = match res.unwrap() {
-                GetResult::Stream(s) => s,
-                GetResult::File(_, _) => unimplemented!(),
+            let s = match res.unwrap().payload {
+                GetResultPayload::Stream(s) => s,
+                GetResultPayload::File(_, _) => unimplemented!(),
             };
 
             s.map_ok(|b| bytes::BytesMut::from(&b[..]))
@@ -546,17 +615,12 @@ mod tests {
     }
 
     #[allow(dead_code)]
-    async fn measure_list(
-        store: &ThrottledStore<InMemory>,
-        n_entries: usize,
-    ) -> Duration {
+    async fn measure_list(store: &ThrottledStore<InMemory>, n_entries: usize) -> Duration {
         let prefix = place_test_objects(store, n_entries).await;
 
         let t0 = Instant::now();
         store
             .list(Some(&prefix))
-            .await
-            .unwrap()
             .try_collect::<Vec<_>>()
             .await
             .unwrap();
@@ -579,10 +643,9 @@ mod tests {
 
     async fn measure_put(store: &ThrottledStore<InMemory>, n_bytes: usize) -> Duration {
         let data: Vec<_> = std::iter::repeat(1u8).take(n_bytes).collect();
-        let bytes = Bytes::from(data);
 
         let t0 = Instant::now();
-        store.put(&Path::from("foo"), bytes).await.unwrap();
+        store.put(&Path::from("foo"), data.into()).await.unwrap();
 
         t0.elapsed()
     }

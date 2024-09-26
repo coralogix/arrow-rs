@@ -18,18 +18,17 @@
 //! An object store that limits the maximum concurrency of the wrapped implementation
 
 use crate::{
-    BoxStream, GetResult, ListResult, MultipartId, ObjectMeta, ObjectStore, Path, Result,
-    StreamExt,
+    BoxStream, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, Path, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result, StreamExt,
+    UploadPart,
 };
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
-use std::io::{Error, IoSlice};
+use futures::{FutureExt, Stream};
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::AsyncWrite;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// Store wrapper that wraps an inner store and limits the maximum number of concurrent
@@ -72,37 +71,50 @@ impl<T: ObjectStore> std::fmt::Display for LimitStore<T> {
 
 #[async_trait]
 impl<T: ObjectStore> ObjectStore for LimitStore<T> {
-    async fn put(&self, location: &Path, bytes: Bytes) -> Result<()> {
+    async fn put(&self, location: &Path, payload: PutPayload) -> Result<PutResult> {
         let _permit = self.semaphore.acquire().await.unwrap();
-        self.inner.put(location, bytes).await
+        self.inner.put(location, payload).await
     }
 
-    async fn put_multipart(
+    async fn put_opts(
         &self,
         location: &Path,
-    ) -> Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)> {
-        let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
-        let (id, write) = self.inner.put_multipart(location).await?;
-        Ok((id, Box::new(PermitWrapper::new(write, permit))))
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<PutResult> {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        self.inner.put_opts(location, payload, opts).await
+    }
+    async fn put_multipart(&self, location: &Path) -> Result<Box<dyn MultipartUpload>> {
+        let upload = self.inner.put_multipart(location).await?;
+        Ok(Box::new(LimitUpload {
+            semaphore: Arc::clone(&self.semaphore),
+            upload,
+        }))
     }
 
-    async fn abort_multipart(
+    async fn put_multipart_opts(
         &self,
         location: &Path,
-        multipart_id: &MultipartId,
-    ) -> Result<()> {
-        let _permit = self.semaphore.acquire().await.unwrap();
-        self.inner.abort_multipart(location, multipart_id).await
+        opts: PutMultipartOpts,
+    ) -> Result<Box<dyn MultipartUpload>> {
+        let upload = self.inner.put_multipart_opts(location, opts).await?;
+        Ok(Box::new(LimitUpload {
+            semaphore: Arc::clone(&self.semaphore),
+            upload,
+        }))
     }
 
     async fn get(&self, location: &Path) -> Result<GetResult> {
         let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
-        match self.inner.get(location).await? {
-            r @ GetResult::File(_, _) => Ok(r),
-            GetResult::Stream(s) => {
-                Ok(GetResult::Stream(PermitWrapper::new(s, permit).boxed()))
-            }
-        }
+        let r = self.inner.get(location).await?;
+        Ok(permit_get_result(r, permit))
+    }
+
+    async fn get_opts(&self, location: &Path, options: GetOptions) -> Result<GetResult> {
+        let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
+        let r = self.inner.get_opts(location, options).await?;
+        Ok(permit_get_result(r, permit))
     }
 
     async fn get_range(&self, location: &Path, range: Range<usize>) -> Result<Bytes> {
@@ -110,11 +122,7 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         self.inner.get_range(location, range).await
     }
 
-    async fn get_ranges(
-        &self,
-        location: &Path,
-        ranges: &[Range<usize>],
-    ) -> Result<Vec<Bytes>> {
+    async fn get_ranges(&self, location: &Path, ranges: &[Range<usize>]) -> Result<Vec<Bytes>> {
         let _permit = self.semaphore.acquire().await.unwrap();
         self.inner.get_ranges(location, ranges).await
     }
@@ -129,13 +137,38 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
         self.inner.delete(location).await
     }
 
-    async fn list(
+    fn delete_stream<'a>(
+        &'a self,
+        locations: BoxStream<'a, Result<Path>>,
+    ) -> BoxStream<'a, Result<Path>> {
+        self.inner.delete_stream(locations)
+    }
+
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, Result<ObjectMeta>> {
+        let prefix = prefix.cloned();
+        let fut = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .map(move |permit| {
+                let s = self.inner.list(prefix.as_ref());
+                PermitWrapper::new(s, permit.unwrap())
+            });
+        fut.into_stream().flatten().boxed()
+    }
+
+    fn list_with_offset(
         &self,
         prefix: Option<&Path>,
-    ) -> Result<BoxStream<'_, Result<ObjectMeta>>> {
-        let permit = Arc::clone(&self.semaphore).acquire_owned().await.unwrap();
-        let s = self.inner.list(prefix).await?;
-        Ok(PermitWrapper::new(s, permit).boxed())
+        offset: &Path,
+    ) -> BoxStream<'_, Result<ObjectMeta>> {
+        let prefix = prefix.cloned();
+        let offset = offset.clone();
+        let fut = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .map(move |permit| {
+                let s = self.inner.list_with_offset(prefix.as_ref(), &offset);
+                PermitWrapper::new(s, permit.unwrap())
+            });
+        fut.into_stream().flatten().boxed()
     }
 
     async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
@@ -164,6 +197,16 @@ impl<T: ObjectStore> ObjectStore for LimitStore<T> {
     }
 }
 
+fn permit_get_result(r: GetResult, permit: OwnedSemaphorePermit) -> GetResult {
+    let payload = match r.payload {
+        v @ GetResultPayload::File(_, _) => v,
+        GetResultPayload::Stream(s) => {
+            GetResultPayload::Stream(PermitWrapper::new(s, permit).boxed())
+        }
+    };
+    GetResult { payload, ..r }
+}
+
 /// Combines an [`OwnedSemaphorePermit`] with some other type
 struct PermitWrapper<T> {
     inner: T,
@@ -180,10 +223,7 @@ impl<T> PermitWrapper<T> {
 impl<T: Stream + Unpin> Stream for PermitWrapper<T> {
     type Item = T::Item;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Pin::new(&mut self.inner).poll_next(cx)
     }
 
@@ -192,51 +232,53 @@ impl<T: Stream + Unpin> Stream for PermitWrapper<T> {
     }
 }
 
-impl<T: AsyncWrite + Unpin> AsyncWrite for PermitWrapper<T> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::result::Result<usize, Error>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+/// An [`MultipartUpload`] wrapper that limits the maximum number of concurrent requests
+#[derive(Debug)]
+pub struct LimitUpload {
+    upload: Box<dyn MultipartUpload>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl LimitUpload {
+    /// Create a new [`LimitUpload`] limiting `upload` to `max_concurrency` concurrent requests
+    pub fn new(upload: Box<dyn MultipartUpload>, max_concurrency: usize) -> Self {
+        Self {
+            upload,
+            semaphore: Arc::new(Semaphore::new(max_concurrency)),
+        }
+    }
+}
+
+#[async_trait]
+impl MultipartUpload for LimitUpload {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let upload = self.upload.put_part(data);
+        let s = Arc::clone(&self.semaphore);
+        Box::pin(async move {
+            let _permit = s.acquire().await.unwrap();
+            upload.await
+        })
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Error>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+    async fn complete(&mut self) -> Result<PutResult> {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        self.upload.complete().await
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::result::Result<(), Error>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
-    }
-
-    fn poll_write_vectored(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bufs: &[IoSlice<'_>],
-    ) -> Poll<std::result::Result<usize, Error>> {
-        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.inner.is_write_vectored()
+    async fn abort(&mut self) -> Result<()> {
+        let _permit = self.semaphore.acquire().await.unwrap();
+        self.upload.abort().await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::integration::*;
     use crate::limit::LimitStore;
     use crate::memory::InMemory;
-    use crate::tests::{
-        list_uses_directories_correctly, list_with_delimiter, put_get_delete_list,
-        rename_and_copy, stream_get,
-    };
     use crate::ObjectStore;
+    use futures::stream::StreamExt;
+    use std::pin::Pin;
     use std::time::Duration;
     use tokio::time::timeout;
 
@@ -247,6 +289,7 @@ mod tests {
         let integration = LimitStore::new(memory, max_requests);
 
         put_get_delete_list(&integration).await;
+        get_opts(&integration).await;
         list_uses_directories_correctly(&integration).await;
         list_with_delimiter(&integration).await;
         rename_and_copy(&integration).await;
@@ -254,19 +297,21 @@ mod tests {
 
         let mut streams = Vec::with_capacity(max_requests);
         for _ in 0..max_requests {
-            let stream = integration.list(None).await.unwrap();
+            let mut stream = integration.list(None).peekable();
+            Pin::new(&mut stream).peek().await; // Ensure semaphore is acquired
             streams.push(stream);
         }
 
         let t = Duration::from_millis(20);
 
         // Expect to not be able to make another request
-        assert!(timeout(t, integration.list(None)).await.is_err());
+        let fut = integration.list(None).collect::<Vec<_>>();
+        assert!(timeout(t, fut).await.is_err());
 
         // Drop one of the streams
         streams.pop();
 
         // Can now make another request
-        integration.list(None).await.unwrap();
+        integration.list(None).collect::<Vec<_>>().await;
     }
 }

@@ -17,6 +17,7 @@
 
 use crate::basic::Encoding;
 use crate::column::page::Page;
+use bytes::Bytes;
 use rand::{
     distributions::{uniform::SampleUniform, Distribution, Standard},
     thread_rng, Rng,
@@ -26,7 +27,6 @@ use std::collections::VecDeque;
 use crate::data_type::*;
 use crate::encodings::encoding::{DictEncoder, Encoder};
 use crate::schema::types::ColumnDescPtr;
-use crate::util::memory::ByteBufferPtr;
 use crate::util::{DataPageBuilder, DataPageBuilderImpl};
 
 /// Random generator of data type `T` values and sequences.
@@ -90,7 +90,7 @@ impl RandGen<ByteArrayType> for ByteArrayType {
         for _ in 0..len {
             value.push(rng.gen_range(0..255));
         }
-        result.set_data(ByteBufferPtr::new(value));
+        result.set_data(Bytes::from(value));
         result
     }
 }
@@ -173,8 +173,7 @@ pub fn make_pages<T: DataType>(
 
         // Generate the current page
 
-        let mut pb =
-            DataPageBuilderImpl::new(desc.clone(), num_values_cur_page as u32, use_v2);
+        let mut pb = DataPageBuilderImpl::new(desc.clone(), num_values_cur_page as u32, use_v2);
         if max_rep_level > 0 {
             pb.add_rep_levels(max_rep_level, &rep_levels[level_range.clone()]);
         }
@@ -194,7 +193,7 @@ pub fn make_pages<T: DataType>(
             Encoding::PLAIN => {
                 pb.add_values::<T>(encoding, &values[value_range]);
             }
-            enc => panic!("Unexpected encoding {}", enc),
+            enc => panic!("Unexpected encoding {enc}"),
         }
 
         let data_page = pb.consume();

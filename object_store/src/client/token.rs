@@ -16,7 +16,7 @@
 // under the License.
 
 use std::future::Future;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 /// A temporary authentication token with an associated expiry
@@ -25,7 +25,8 @@ pub struct TemporaryToken<T> {
     /// The temporary credential
     pub token: T,
     /// The instant at which this credential is no longer valid
-    pub expiry: Instant,
+    /// None means the credential does not expire
+    pub expiry: Option<Instant>,
 }
 
 /// Provides [`TokenCache::get_or_insert_with`] which can be used to cache a
@@ -33,17 +34,25 @@ pub struct TemporaryToken<T> {
 #[derive(Debug)]
 pub struct TokenCache<T> {
     cache: Mutex<Option<TemporaryToken<T>>>,
+    min_ttl: Duration,
 }
 
 impl<T> Default for TokenCache<T> {
     fn default() -> Self {
         Self {
             cache: Default::default(),
+            min_ttl: Duration::from_secs(300),
         }
     }
 }
 
 impl<T: Clone + Send> TokenCache<T> {
+    /// Override the minimum remaining TTL for a cached token to be used
+    #[cfg(feature = "aws")]
+    pub fn with_min_ttl(self, min_ttl: Duration) -> Self {
+        Self { min_ttl, ..self }
+    }
+
     pub async fn get_or_insert_with<F, Fut, E>(&self, f: F) -> Result<T, E>
     where
         F: FnOnce() -> Fut + Send,
@@ -53,13 +62,12 @@ impl<T: Clone + Send> TokenCache<T> {
         let mut locked = self.cache.lock().await;
 
         if let Some(cached) = locked.as_ref() {
-            let delta = cached
-                .expiry
-                .checked_duration_since(now)
-                .unwrap_or_default();
-
-            if delta.as_secs() > 300 {
-                return Ok(cached.token.clone());
+            match cached.expiry {
+                Some(ttl) if ttl.checked_duration_since(now).unwrap_or_default() > self.min_ttl => {
+                    return Ok(cached.token.clone());
+                }
+                None => return Ok(cached.token.clone()),
+                _ => (),
             }
         }
 

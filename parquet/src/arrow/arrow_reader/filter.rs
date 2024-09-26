@@ -16,11 +16,12 @@
 // under the License.
 
 use crate::arrow::ProjectionMask;
-use arrow::array::BooleanArray;
-use arrow::error::Result as ArrowResult;
-use arrow::record_batch::RecordBatch;
+use arrow_array::{BooleanArray, RecordBatch};
+use arrow_schema::ArrowError;
 
 /// A predicate operating on [`RecordBatch`]
+///
+/// See [`RowFilter`] for more information on the use of this trait.
 pub trait ArrowPredicate: Send + 'static {
     /// Returns the [`ProjectionMask`] that describes the columns required
     /// to evaluate this predicate. All projected columns will be provided in the `batch`
@@ -30,9 +31,11 @@ pub trait ArrowPredicate: Send + 'static {
     /// Evaluate this predicate for the given [`RecordBatch`] containing the columns
     /// identified by [`Self::projection`]
     ///
-    /// Rows that are `true` in the returned [`BooleanArray`] will be returned by the
-    /// parquet reader, whereas rows that are `false` or `Null` will not be
-    fn evaluate(&mut self, batch: RecordBatch) -> ArrowResult<BooleanArray>;
+    /// Must return a [`BooleanArray`] that has the same length as the input
+    /// `batch` where each row indicates whether the row should be returned:
+    /// * `true`:the row should be returned
+    /// * `false` or `null`: the row should not be returned
+    fn evaluate(&mut self, batch: RecordBatch) -> Result<BooleanArray, ArrowError>;
 }
 
 /// An [`ArrowPredicate`] created from an [`FnMut`]
@@ -43,7 +46,7 @@ pub struct ArrowPredicateFn<F> {
 
 impl<F> ArrowPredicateFn<F>
 where
-    F: FnMut(RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
+    F: FnMut(RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
 {
     /// Create a new [`ArrowPredicateFn`]. `f` will be passed batches
     /// that contains the columns specified in `projection`
@@ -56,23 +59,28 @@ where
 
 impl<F> ArrowPredicate for ArrowPredicateFn<F>
 where
-    F: FnMut(RecordBatch) -> ArrowResult<BooleanArray> + Send + 'static,
+    F: FnMut(RecordBatch) -> Result<BooleanArray, ArrowError> + Send + 'static,
 {
     fn projection(&self) -> &ProjectionMask {
         &self.projection
     }
 
-    fn evaluate(&mut self, batch: RecordBatch) -> ArrowResult<BooleanArray> {
+    fn evaluate(&mut self, batch: RecordBatch) -> Result<BooleanArray, ArrowError> {
         (self.f)(batch)
     }
 }
 
-/// A [`RowFilter`] allows pushing down a filter predicate to skip IO and decode
+/// Filter applied *during* the parquet read process
 ///
-/// This consists of a list of [`ArrowPredicate`] where only the rows that satisfy all
-/// of the predicates will be returned. Any [`RowSelection`] will be applied prior
+/// [`RowFilter`] applies predicates in order, after decoding only the columns
+/// required. As predicates eliminate rows, fewer rows from subsequent columns
+/// may be required, thus potentially reducing IO and decode.
+///
+/// A `RowFilter` consists of a list of [`ArrowPredicate`]s. Only the rows for which
+/// all the predicates evaluate to `true` will be returned.
+/// Any [`RowSelection`] provided to the reader will be applied prior
 /// to the first predicate, and each predicate in turn will then be used to compute
-/// a more refined [`RowSelection`] to use when evaluating the subsequent predicates.
+/// a more refined [`RowSelection`] used when evaluating the subsequent predicates.
 ///
 /// Once all predicates have been evaluated, the final [`RowSelection`] is applied
 /// to the top-level [`ProjectionMask`] to produce the final output [`RecordBatch`].
@@ -95,7 +103,11 @@ where
 /// leaves 99% of the rows, it may be better to not filter the data from parquet and
 /// apply the filter after the RecordBatch has been fully decoded.
 ///
-/// [`RowSelection`]: [super::selection::RowSelection]
+/// Additionally, even if a predicate eliminates a moderate number of rows, it may still be faster
+/// to filter the data after the RecordBatch has been fully decoded, if the eliminated rows are
+/// not contiguous.
+///
+/// [`RowSelection`]: crate::arrow::arrow_reader::RowSelection
 pub struct RowFilter {
     /// A list of [`ArrowPredicate`]
     pub(crate) predicates: Vec<Box<dyn ArrowPredicate>>,
