@@ -15,10 +15,13 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::basic::Encoding;
+use bytes::Bytes;
+use half::f16;
+
+use crate::basic::{ConvertedType, Encoding, LogicalType, Type};
+use crate::bloom_filter::Sbbf;
 use crate::column::writer::{
-    compare_greater, fallback_encoding, has_dictionary_support, is_nan, update_max,
-    update_min,
+    compare_greater, fallback_encoding, has_dictionary_support, is_nan, update_max, update_min,
 };
 use crate::data_type::private::ParquetValueType;
 use crate::data_type::DataType;
@@ -26,7 +29,6 @@ use crate::encodings::encoding::{get_encoder, DictEncoder, Encoder};
 use crate::errors::{ParquetError, Result};
 use crate::file::properties::{EnabledStatistics, WriterProperties};
 use crate::schema::types::{ColumnDescPtr, ColumnDescriptor};
-use crate::util::memory::ByteBufferPtr;
 
 /// A collection of [`ParquetValueType`] encoded by a [`ColumnValueEncoder`]
 pub trait ColumnValues {
@@ -34,10 +36,10 @@ pub trait ColumnValues {
     fn len(&self) -> usize;
 }
 
-#[cfg(any(feature = "arrow", test))]
-impl<T: arrow::array::Array> ColumnValues for T {
+#[cfg(feature = "arrow")]
+impl ColumnValues for dyn arrow_array::Array {
     fn len(&self) -> usize {
-        arrow::array::Array::len(self)
+        arrow_array::Array::len(self)
     }
 }
 
@@ -49,18 +51,19 @@ impl<T: ParquetValueType> ColumnValues for [T] {
 
 /// The encoded data for a dictionary page
 pub struct DictionaryPage {
-    pub buf: ByteBufferPtr,
+    pub buf: Bytes,
     pub num_values: usize,
     pub is_sorted: bool,
 }
 
 /// The encoded values for a data page, with optional statistics
 pub struct DataPageValues<T> {
-    pub buf: ByteBufferPtr,
+    pub buf: Bytes,
     pub num_values: usize,
     pub encoding: Encoding,
     pub min_value: Option<T>,
     pub max_value: Option<T>,
+    pub variable_length_bytes: Option<i64>,
 }
 
 /// A generic encoder of [`ColumnValues`] to data and dictionary pages used by
@@ -73,15 +76,6 @@ pub trait ColumnValueEncoder {
 
     /// The values encoded by this encoder
     type Values: ColumnValues + ?Sized;
-
-    /// Returns the min and max values in this collection, skipping any NaN values
-    ///
-    /// Returns `None` if no values found
-    fn min_max(
-        &self,
-        values: &Self::Values,
-        value_indices: Option<&[usize]>,
-    ) -> Option<(Self::T, Self::T)>;
 
     /// Create a new [`ColumnValueEncoder`]
     fn try_new(descr: &ColumnDescPtr, props: &WriterProperties) -> Result<Self>
@@ -100,10 +94,17 @@ pub trait ColumnValueEncoder {
     /// Returns true if this encoder has a dictionary page
     fn has_dictionary(&self) -> bool;
 
-    /// Returns an estimate of the dictionary page size in bytes, or `None` if no dictionary
+    /// Returns the estimated total memory usage of the encoder
+    ///
+    fn estimated_memory_size(&self) -> usize;
+
+    /// Returns an estimate of the encoded size of dictionary page size in bytes, or `None` if no dictionary
     fn estimated_dict_page_size(&self) -> Option<usize>;
 
-    /// Returns an estimate of the data page size in bytes
+    /// Returns an estimate of the encoded data page size in bytes
+    ///
+    /// This should include:
+    /// <already_written_encoded_byte_size> + <estimated_encoded_size_of_unflushed_bytes>
     fn estimated_data_page_size(&self) -> usize;
 
     /// Flush the dictionary page for this column chunk if any. Any subsequent calls to
@@ -115,6 +116,11 @@ pub trait ColumnValueEncoder {
 
     /// Flush the next data page for this column chunk
     fn flush_data_page(&mut self) -> Result<DataPageValues<Self::T>>;
+
+    /// Flushes bloom filter if enabled and returns it, otherwise returns `None`. Subsequent writes
+    /// will *not* be tracked by the bloom filter as it is empty since. This should be called once
+    /// near the end of encoding.
+    fn flush_bloom_filter(&mut self) -> Option<Sbbf>;
 }
 
 pub struct ColumnValueEncoderImpl<T: DataType> {
@@ -125,14 +131,37 @@ pub struct ColumnValueEncoderImpl<T: DataType> {
     statistics_enabled: EnabledStatistics,
     min_value: Option<T::T>,
     max_value: Option<T::T>,
+    bloom_filter: Option<Sbbf>,
+    variable_length_bytes: Option<i64>,
 }
 
 impl<T: DataType> ColumnValueEncoderImpl<T> {
+    fn min_max(&self, values: &[T::T], value_indices: Option<&[usize]>) -> Option<(T::T, T::T)> {
+        match value_indices {
+            Some(indices) => get_min_max(&self.descr, indices.iter().map(|x| &values[*x])),
+            None => get_min_max(&self.descr, values.iter()),
+        }
+    }
+
     fn write_slice(&mut self, slice: &[T::T]) -> Result<()> {
-        if self.statistics_enabled == EnabledStatistics::Page {
+        if self.statistics_enabled != EnabledStatistics::None
+            // INTERVAL has undefined sort order, so don't write min/max stats for it
+            && self.descr.converted_type() != ConvertedType::INTERVAL
+        {
             if let Some((min, max)) = self.min_max(slice, None) {
                 update_min(&self.descr, &min, &mut self.min_value);
                 update_max(&self.descr, &max, &mut self.max_value);
+            }
+
+            if let Some(var_bytes) = T::T::variable_length_bytes(slice) {
+                *self.variable_length_bytes.get_or_insert(0) += var_bytes;
+            }
+        }
+
+        // encode the values into bloom filter if enabled
+        if let Some(bloom_filter) = &mut self.bloom_filter {
+            for value in slice {
+                bloom_filter.insert(value);
             }
         }
 
@@ -148,17 +177,8 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
 
     type Values = [T::T];
 
-    fn min_max(
-        &self,
-        values: &Self::Values,
-        value_indices: Option<&[usize]>,
-    ) -> Option<(Self::T, Self::T)> {
-        match value_indices {
-            Some(indices) => {
-                get_min_max(&self.descr, indices.iter().map(|x| &values[*x]))
-            }
-            None => get_min_max(&self.descr, values.iter()),
-        }
+    fn flush_bloom_filter(&mut self) -> Option<Sbbf> {
+        self.bloom_filter.take()
     }
 
     fn try_new(descr: &ColumnDescPtr, props: &WriterProperties) -> Result<Self> {
@@ -171,9 +191,15 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
             props
                 .encoding(descr.path())
                 .unwrap_or_else(|| fallback_encoding(T::get_physical_type(), props)),
+            descr,
         )?;
 
         let statistics_enabled = props.statistics_enabled(descr.path());
+
+        let bloom_filter = props
+            .bloom_filter_properties(descr.path())
+            .map(|props| Sbbf::new_with_ndv_fpp(props.ndv, props.fpp))
+            .transpose()?;
 
         Ok(Self {
             encoder,
@@ -181,8 +207,10 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
             descr: descr.clone(),
             num_values: 0,
             statistics_enabled,
+            bloom_filter,
             min_value: None,
             max_value: None,
+            variable_length_bytes: None,
         })
     }
 
@@ -201,6 +229,7 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
     }
 
     fn write_gather(&mut self, values: &Self::Values, indices: &[usize]) -> Result<()> {
+        self.num_values += indices.len();
         let slice: Vec<_> = indices.iter().map(|idx| values[*idx].clone()).collect();
         self.write_slice(&slice)
     }
@@ -211,6 +240,24 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
 
     fn has_dictionary(&self) -> bool {
         self.dict_encoder.is_some()
+    }
+
+    fn estimated_memory_size(&self) -> usize {
+        let encoder_size = self.encoder.estimated_memory_size();
+
+        let dict_encoder_size = self
+            .dict_encoder
+            .as_ref()
+            .map(|encoder| encoder.estimated_memory_size())
+            .unwrap_or_default();
+
+        let bloom_filter_size = self
+            .bloom_filter
+            .as_ref()
+            .map(|bf| bf.estimated_memory_size())
+            .unwrap_or_default();
+
+        encoder_size + dict_encoder_size + bloom_filter_size
     }
 
     fn estimated_dict_page_size(&self) -> Option<usize> {
@@ -257,6 +304,7 @@ impl<T: DataType> ColumnValueEncoder for ColumnValueEncoderImpl<T> {
             num_values: std::mem::take(&mut self.num_values),
             min_value: self.min_value.take(),
             max_value: self.max_value.take(),
+            variable_length_bytes: self.variable_length_bytes.take(),
         })
     }
 }
@@ -268,7 +316,7 @@ where
 {
     let first = loop {
         let next = iter.next()?;
-        if !is_nan(next) {
+        if !is_nan(descr, next) {
             break next;
         }
     };
@@ -276,7 +324,7 @@ where
     let mut min = first;
     let mut max = first;
     for val in iter {
-        if is_nan(val) {
+        if is_nan(descr, val) {
             continue;
         }
         if compare_greater(descr, min, val) {
@@ -286,5 +334,36 @@ where
             max = val;
         }
     }
-    Some((min.clone(), max.clone()))
+
+    // Float/Double statistics have special case for zero.
+    //
+    // If computed min is zero, whether negative or positive,
+    // the spec states that the min should be written as -0.0
+    // (negative zero)
+    //
+    // For max, it has similar logic but will be written as 0.0
+    // (positive zero)
+    let min = replace_zero(min, descr, -0.0);
+    let max = replace_zero(max, descr, 0.0);
+
+    Some((min, max))
+}
+
+#[inline]
+fn replace_zero<T: ParquetValueType>(val: &T, descr: &ColumnDescriptor, replace: f32) -> T {
+    match T::PHYSICAL_TYPE {
+        Type::FLOAT if f32::from_le_bytes(val.as_bytes().try_into().unwrap()) == 0.0 => {
+            T::try_from_le_slice(&f32::to_le_bytes(replace)).unwrap()
+        }
+        Type::DOUBLE if f64::from_le_bytes(val.as_bytes().try_into().unwrap()) == 0.0 => {
+            T::try_from_le_slice(&f64::to_le_bytes(replace as f64)).unwrap()
+        }
+        Type::FIXED_LEN_BYTE_ARRAY
+            if descr.logical_type() == Some(LogicalType::Float16)
+                && f16::from_le_bytes(val.as_bytes().try_into().unwrap()) == f16::NEG_ZERO =>
+        {
+            T::try_from_le_slice(&f16::to_le_bytes(f16::from_f32(replace))).unwrap()
+        }
+        _ => val.clone(),
+    }
 }

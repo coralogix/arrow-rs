@@ -24,7 +24,9 @@
 
 This crate contains the official Native Rust implementation of [Apache Parquet](https://parquet.apache.org/), which is part of the [Apache Arrow](https://arrow.apache.org/) project.
 
-See [crate documentation](https://docs.rs/parquet/latest/parquet/) for examples and the full API.
+See the [API documentation](https://docs.rs/parquet/latest) for examples and the full API.
+
+The API documentation for most recent, unreleased code is available [here](https://arrow.apache.org/rust/parquet/index.html).
 
 ## Rust Version Compatibility
 
@@ -32,9 +34,18 @@ This crate is tested with the latest stable version of Rust. We do not currently
 
 ## Versioning / Releases
 
-The arrow crate follows the [SemVer standard](https://doc.rust-lang.org/cargo/reference/semver.html) defined by Cargo and works well within the Rust crate ecosystem.
+The `parquet` crate follows the [SemVer standard] defined by Cargo and works well
+within the Rust crate ecosystem. See the [repository README] for more details on
+the release schedule and version.
 
-However, for historical reasons, this crate uses versions with major numbers greater than `0.x` (e.g. `19.0.0`), unlike many other crates in the Rust ecosystem which spend extended time releasing versions `0.x` to signal planned ongoing API changes. Minor arrow releases contain only compatible changes, while major releases may contain breaking API changes.
+[semver standard]: https://doc.rust-lang.org/cargo/reference/semver.html
+[repository readme]: https://github.com/apache/arrow-rs
+
+Note that for historical reasons, this crate uses versions with major numbers
+greater than `0.x` (e.g. `19.0.0`), unlike many other crates in the Rust
+ecosystem which spend extended time releasing versions `0.x` to signal planned
+ongoing API changes. Minor arrow releases contain only compatible changes, while
+major releases may contain breaking API changes.
 
 ## Feature Flags
 
@@ -47,6 +58,7 @@ The `parquet` crate provides the following features which may be enabled in your
 - `flate2` (default) - support for parquet using `gzip` compression
 - `lz4` (default) - support for parquet using `lz4` compression
 - `zstd` (default) - support for parquet using `zstd` compression
+- `snap` (default) - support for parquet using `snappy` compression
 - `cli` - parquet [CLI tools](https://github.com/apache/arrow-rs/tree/master/parquet/src/bin)
 - `experimental` - Experimental APIs which may change, even between minor releases
 
@@ -64,8 +76,8 @@ The `parquet` crate provides the following features which may be enabled in your
   - [x] Primitive column value writers
   - [ ] Row record writer
   - [x] Arrow record writer
-  - [ ] Async support
-- [ ] Predicate pushdown
+  - [x] Async support
+- [x] Predicate pushdown
 - [x] Parquet format 4.0.0 support
 
 ## License

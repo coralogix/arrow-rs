@@ -15,25 +15,48 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use super::credential::{AzureCredential, CredentialProvider};
+use super::credential::AzureCredential;
 use crate::azure::credential::*;
-use crate::client::pagination::stream_paginated;
+use crate::azure::{AzureCredentialProvider, STORE};
+use crate::client::get::GetClient;
+use crate::client::header::{get_put_result, HeaderConfig};
+use crate::client::list::ListClient;
 use crate::client::retry::RetryExt;
+use crate::client::GetOptionsExt;
+use crate::multipart::PartId;
 use crate::path::DELIMITER;
-use crate::util::{format_http_range, format_prefix};
-use crate::{BoxStream, ListResult, ObjectMeta, Path, Result, RetryConfig, StreamExt};
-use bytes::{Buf, Bytes};
-use chrono::{DateTime, TimeZone, Utc};
-use itertools::Itertools;
-use reqwest::{
-    header::{HeaderValue, CONTENT_LENGTH, IF_NONE_MATCH, RANGE},
-    Client as ReqwestClient, Method, Response, StatusCode,
+use crate::util::{deserialize_rfc1123, GetRange};
+use crate::{
+    Attribute, Attributes, ClientOptions, GetOptions, ListResult, ObjectMeta, Path, PutMode,
+    PutMultipartOpts, PutOptions, PutPayload, PutResult, Result, RetryConfig, TagSet,
 };
-use serde::{Deserialize, Deserializer, Serialize};
-use snafu::{ResultExt, Snafu};
+use async_trait::async_trait;
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use bytes::{Buf, Bytes};
+use chrono::{DateTime, Utc};
+use hyper::http::HeaderName;
+use reqwest::{
+    header::{HeaderValue, CONTENT_LENGTH, IF_MATCH, IF_NONE_MATCH},
+    Client as ReqwestClient, Method, RequestBuilder, Response,
+};
+use serde::{Deserialize, Serialize};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::collections::HashMap;
-use std::ops::Range;
+use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
+
+const VERSION_HEADER: &str = "x-ms-version-id";
+const USER_DEFINED_METADATA_HEADER_PREFIX: &str = "x-ms-meta-";
+static MS_CACHE_CONTROL: HeaderName = HeaderName::from_static("x-ms-blob-cache-control");
+static MS_CONTENT_TYPE: HeaderName = HeaderName::from_static("x-ms-blob-content-type");
+static MS_CONTENT_DISPOSITION: HeaderName =
+    HeaderName::from_static("x-ms-blob-content-disposition");
+static MS_CONTENT_ENCODING: HeaderName = HeaderName::from_static("x-ms-blob-content-encoding");
+static MS_CONTENT_LANGUAGE: HeaderName = HeaderName::from_static("x-ms-blob-content-language");
+
+static TAGS_HEADER: HeaderName = HeaderName::from_static("x-ms-tags");
 
 /// A specialized `Error` for object store-related errors
 #[derive(Debug, Snafu)]
@@ -42,12 +65,6 @@ pub(crate) enum Error {
     #[snafu(display("Error performing get request {}: {}", path, source))]
     GetRequest {
         source: crate::client::retry::Error,
-        path: String,
-    },
-
-    #[snafu(display("Error getting get response body {}: {}", path, source))]
-    GetResponseBody {
-        source: reqwest::Error,
         path: String,
     },
 
@@ -63,12 +80,6 @@ pub(crate) enum Error {
         path: String,
     },
 
-    #[snafu(display("Error performing copy request {}: {}", path, source))]
-    CopyRequest {
-        source: crate::client::retry::Error,
-        path: String,
-    },
-
     #[snafu(display("Error performing list request: {}", source))]
     ListRequest { source: crate::client::retry::Error },
 
@@ -78,10 +89,28 @@ pub(crate) enum Error {
     #[snafu(display("Got invalid list response: {}", source))]
     InvalidListResponse { source: quick_xml::de::DeError },
 
-    #[snafu(display("Error authorizing request: {}", source))]
-    Authorization {
-        source: crate::azure::credential::Error,
+    #[snafu(display("Unable to extract metadata from headers: {}", source))]
+    Metadata {
+        source: crate::client::header::Error,
     },
+
+    #[snafu(display("ETag required for conditional update"))]
+    MissingETag,
+
+    #[snafu(display("Error requesting user delegation key: {}", source))]
+    DelegationKeyRequest { source: crate::client::retry::Error },
+
+    #[snafu(display("Error getting user delegation key response body: {}", source))]
+    DelegationKeyResponseBody { source: reqwest::Error },
+
+    #[snafu(display("Got invalid user delegation key response: {}", source))]
+    DelegationKeyResponse { source: quick_xml::de::DeError },
+
+    #[snafu(display("Generating SAS keys with SAS tokens auth is not supported"))]
+    SASforSASNotSupported,
+
+    #[snafu(display("Generating SAS keys while skipping signatures is not supported"))]
+    SASwithSkipSignature,
 }
 
 impl From<Error> for crate::Error {
@@ -89,25 +118,9 @@ impl From<Error> for crate::Error {
         match err {
             Error::GetRequest { source, path }
             | Error::DeleteRequest { source, path }
-            | Error::CopyRequest { source, path }
-            | Error::PutRequest { source, path }
-                if matches!(source.status(), Some(StatusCode::NOT_FOUND)) =>
-            {
-                Self::NotFound {
-                    path,
-                    source: Box::new(source),
-                }
-            }
-            Error::CopyRequest { source, path }
-                if matches!(source.status(), Some(StatusCode::CONFLICT)) =>
-            {
-                Self::AlreadyExists {
-                    path,
-                    source: Box::new(source),
-                }
-            }
+            | Error::PutRequest { source, path } => source.error(STORE, path),
             _ => Self::Generic {
-                store: "MicrosoftAzure",
+                store: STORE,
                 source: Box::new(err),
             },
         }
@@ -116,18 +129,20 @@ impl From<Error> for crate::Error {
 
 /// Configuration for [AzureClient]
 #[derive(Debug)]
-pub struct AzureConfig {
+pub(crate) struct AzureConfig {
     pub account: String,
     pub container: String,
-    pub credentials: CredentialProvider,
+    pub credentials: AzureCredentialProvider,
     pub retry_config: RetryConfig,
-    pub allow_http: bool,
     pub service: Url,
     pub is_emulator: bool,
+    pub skip_signature: bool,
+    pub disable_tagging: bool,
+    pub client_options: ClientOptions,
 }
 
 impl AzureConfig {
-    fn path_url(&self, path: &Path) -> Url {
+    pub(crate) fn path_url(&self, path: &Path) -> Url {
         let mut url = self.service.clone();
         {
             let mut path_mut = url.path_segments_mut().unwrap();
@@ -137,6 +152,99 @@ impl AzureConfig {
             path_mut.push(&self.container).extend(path.parts());
         }
         url
+    }
+    async fn get_credential(&self) -> Result<Option<Arc<AzureCredential>>> {
+        if self.skip_signature {
+            Ok(None)
+        } else {
+            Some(self.credentials.get_credential().await).transpose()
+        }
+    }
+}
+
+/// A builder for a put request allowing customisation of the headers and query string
+struct PutRequest<'a> {
+    path: &'a Path,
+    config: &'a AzureConfig,
+    payload: PutPayload,
+    builder: RequestBuilder,
+    idempotent: bool,
+}
+
+impl<'a> PutRequest<'a> {
+    fn header(self, k: &HeaderName, v: &str) -> Self {
+        let builder = self.builder.header(k, v);
+        Self { builder, ..self }
+    }
+
+    fn query<T: Serialize + ?Sized + Sync>(self, query: &T) -> Self {
+        let builder = self.builder.query(query);
+        Self { builder, ..self }
+    }
+
+    fn idempotent(self, idempotent: bool) -> Self {
+        Self { idempotent, ..self }
+    }
+
+    fn with_tags(mut self, tags: TagSet) -> Self {
+        let tags = tags.encoded();
+        if !tags.is_empty() && !self.config.disable_tagging {
+            self.builder = self.builder.header(&TAGS_HEADER, tags);
+        }
+        self
+    }
+
+    fn with_attributes(self, attributes: Attributes) -> Self {
+        let mut builder = self.builder;
+        let mut has_content_type = false;
+        for (k, v) in &attributes {
+            builder = match k {
+                Attribute::CacheControl => builder.header(&MS_CACHE_CONTROL, v.as_ref()),
+                Attribute::ContentDisposition => {
+                    builder.header(&MS_CONTENT_DISPOSITION, v.as_ref())
+                }
+                Attribute::ContentEncoding => builder.header(&MS_CONTENT_ENCODING, v.as_ref()),
+                Attribute::ContentLanguage => builder.header(&MS_CONTENT_LANGUAGE, v.as_ref()),
+                Attribute::ContentType => {
+                    has_content_type = true;
+                    builder.header(&MS_CONTENT_TYPE, v.as_ref())
+                }
+                Attribute::Metadata(k_suffix) => builder.header(
+                    &format!("{}{}", USER_DEFINED_METADATA_HEADER_PREFIX, k_suffix),
+                    v.as_ref(),
+                ),
+            };
+        }
+
+        if !has_content_type {
+            if let Some(value) = self.config.client_options.get_content_type(self.path) {
+                builder = builder.header(&MS_CONTENT_TYPE, value);
+            }
+        }
+        Self { builder, ..self }
+    }
+
+    async fn send(self) -> Result<Response> {
+        let credential = self.config.get_credential().await?;
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
+        let response = self
+            .builder
+            .header(CONTENT_LENGTH, self.payload.content_length())
+            .with_azure_authorization(&credential, &self.config.account)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .idempotent(self.idempotent)
+            .payload(Some(self.payload))
+            .send()
+            .await
+            .context(PutRequestSnafu {
+                path: self.path.as_ref(),
+            })?;
+
+        Ok(response)
     }
 }
 
@@ -148,13 +256,9 @@ pub(crate) struct AzureClient {
 
 impl AzureClient {
     /// create a new instance of [AzureClient]
-    pub fn new(config: AzureConfig) -> Self {
-        let client = reqwest::ClientBuilder::new()
-            .https_only(!config.allow_http)
-            .build()
-            .unwrap();
-
-        Self { config, client }
+    pub fn new(config: AzureConfig) -> Result<Self> {
+        let client = config.client_options.client()?;
+        Ok(Self { config, client })
     }
 
     /// Returns the config
@@ -162,106 +266,90 @@ impl AzureClient {
         &self.config
     }
 
-    async fn get_credential(&self) -> Result<AzureCredential> {
-        match &self.config.credentials {
-            CredentialProvider::AccessKey(key) => {
-                Ok(AzureCredential::AccessKey(key.to_owned()))
-            }
-            CredentialProvider::ClientSecret(cred) => {
-                let token = cred
-                    .fetch_token(&self.client, &self.config.retry_config)
-                    .await
-                    .context(AuthorizationSnafu)?;
-                Ok(AzureCredential::AuthorizationToken(
-                    // we do the conversion to a HeaderValue here, since it is fallible
-                    // and we wna to use it in an infallible function
-                    HeaderValue::from_str(&format!("Bearer {}", token)).map_err(
-                        |err| crate::Error::Generic {
-                            store: "MicrosoftAzure",
-                            source: Box::new(err),
-                        },
-                    )?,
-                ))
-            }
-            CredentialProvider::SASToken(sas) => {
-                Ok(AzureCredential::SASToken(sas.clone()))
-            }
+    async fn get_credential(&self) -> Result<Option<Arc<AzureCredential>>> {
+        self.config.get_credential().await
+    }
+
+    fn put_request<'a>(&'a self, path: &'a Path, payload: PutPayload) -> PutRequest<'a> {
+        let url = self.config.path_url(path);
+        let builder = self.client.request(Method::PUT, url);
+
+        PutRequest {
+            path,
+            builder,
+            payload,
+            config: &self.config,
+            idempotent: false,
         }
     }
 
     /// Make an Azure PUT request <https://docs.microsoft.com/en-us/rest/api/storageservices/put-blob>
-    pub async fn put_request<T: Serialize + crate::Debug + ?Sized + Sync>(
+    pub async fn put_blob(
         &self,
         path: &Path,
-        bytes: Option<Bytes>,
-        is_block_op: bool,
-        query: &T,
-    ) -> Result<Response> {
-        let credential = self.get_credential().await?;
-        let url = self.config.path_url(path);
+        payload: PutPayload,
+        opts: PutOptions,
+    ) -> Result<PutResult> {
+        let builder = self
+            .put_request(path, payload)
+            .with_attributes(opts.attributes)
+            .with_tags(opts.tags);
 
-        let mut builder = self.client.request(Method::PUT, url);
-
-        if !is_block_op {
-            builder = builder.header(&BLOB_TYPE, "BlockBlob").query(query);
-        } else {
-            builder = builder.query(query);
-        }
-
-        if let Some(bytes) = bytes {
-            builder = builder
-                .header(CONTENT_LENGTH, HeaderValue::from(bytes.len()))
-                .body(bytes)
-        } else {
-            builder = builder.header(CONTENT_LENGTH, HeaderValue::from_static("0"));
-        }
-
-        let response = builder
-            .with_azure_authorization(&credential, &self.config.account)
-            .send_retry(&self.config.retry_config)
-            .await
-            .context(PutRequestSnafu {
-                path: path.as_ref(),
-            })?;
-
-        Ok(response)
-    }
-
-    /// Make an Azure GET request
-    /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-blob>
-    /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-blob-properties>
-    pub async fn get_request(
-        &self,
-        path: &Path,
-        range: Option<Range<usize>>,
-        head: bool,
-    ) -> Result<Response> {
-        let credential = self.get_credential().await?;
-        let url = self.config.path_url(path);
-        let method = match head {
-            true => Method::HEAD,
-            false => Method::GET,
+        let builder = match &opts.mode {
+            PutMode::Overwrite => builder.idempotent(true),
+            PutMode::Create => builder.header(&IF_NONE_MATCH, "*"),
+            PutMode::Update(v) => {
+                let etag = v.e_tag.as_ref().context(MissingETagSnafu)?;
+                builder.header(&IF_MATCH, etag)
+            }
         };
 
-        let mut builder = self
-            .client
-            .request(method, url)
-            .header(CONTENT_LENGTH, HeaderValue::from_static("0"))
-            .body(Bytes::new());
+        let response = builder.header(&BLOB_TYPE, "BlockBlob").send().await?;
+        Ok(get_put_result(response.headers(), VERSION_HEADER).context(MetadataSnafu)?)
+    }
 
-        if let Some(range) = range {
-            builder = builder.header(RANGE, format_http_range(range));
-        }
+    /// PUT a block <https://learn.microsoft.com/en-us/rest/api/storageservices/put-block>
+    pub async fn put_block(
+        &self,
+        path: &Path,
+        part_idx: usize,
+        payload: PutPayload,
+    ) -> Result<PartId> {
+        let content_id = format!("{part_idx:20}");
+        let block_id = BASE64_STANDARD.encode(&content_id);
 
-        let response = builder
-            .with_azure_authorization(&credential, &self.config.account)
-            .send_retry(&self.config.retry_config)
-            .await
-            .context(GetRequestSnafu {
-                path: path.as_ref(),
-            })?;
+        self.put_request(path, payload)
+            .query(&[("comp", "block"), ("blockid", &block_id)])
+            .idempotent(true)
+            .send()
+            .await?;
 
-        Ok(response)
+        Ok(PartId { content_id })
+    }
+
+    /// PUT a block list <https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list>
+    pub async fn put_block_list(
+        &self,
+        path: &Path,
+        parts: Vec<PartId>,
+        opts: PutMultipartOpts,
+    ) -> Result<PutResult> {
+        let blocks = parts
+            .into_iter()
+            .map(|part| BlockId::from(part.content_id))
+            .collect();
+
+        let payload = BlockList { blocks }.to_xml().into();
+        let response = self
+            .put_request(path, payload)
+            .with_attributes(opts.attributes)
+            .with_tags(opts.tags)
+            .query(&[("comp", "blocklist")])
+            .idempotent(true)
+            .send()
+            .await?;
+
+        Ok(get_put_result(response.headers(), VERSION_HEADER).context(MetadataSnafu)?)
     }
 
     /// Make an Azure Delete request <https://docs.microsoft.com/en-us/rest/api/storageservices/delete-blob>
@@ -273,12 +361,18 @@ impl AzureClient {
         let credential = self.get_credential().await?;
         let url = self.config.path_url(path);
 
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
         self.client
             .request(Method::DELETE, url)
             .query(query)
             .header(&DELETE_SNAPSHOTS, "include")
             .with_azure_authorization(&credential, &self.config.account)
-            .send_retry(&self.config.retry_config)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .send()
             .await
             .context(DeleteRequestSnafu {
                 path: path.as_ref(),
@@ -288,19 +382,14 @@ impl AzureClient {
     }
 
     /// Make an Azure Copy request <https://docs.microsoft.com/en-us/rest/api/storageservices/copy-blob>
-    pub async fn copy_request(
-        &self,
-        from: &Path,
-        to: &Path,
-        overwrite: bool,
-    ) -> Result<()> {
+    pub async fn copy_request(&self, from: &Path, to: &Path, overwrite: bool) -> Result<()> {
         let credential = self.get_credential().await?;
         let url = self.config.path_url(to);
         let mut source = self.config.path_url(from);
 
         // If using SAS authorization must include the headers in the URL
         // <https://docs.microsoft.com/en-us/rest/api/storageservices/copy-blob#request-headers>
-        if let AzureCredential::SASToken(pairs) = &credential {
+        if let Some(AzureCredential::SASToken(pairs)) = credential.as_deref() {
             source.query_pairs_mut().extend_pairs(pairs);
         }
 
@@ -314,24 +403,207 @@ impl AzureClient {
             builder = builder.header(IF_NONE_MATCH, "*");
         }
 
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
         builder
             .with_azure_authorization(&credential, &self.config.account)
-            .send_retry(&self.config.retry_config)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .idempotent(overwrite)
+            .send()
             .await
-            .context(CopyRequestSnafu {
-                path: from.as_ref(),
-            })?;
+            .map_err(|err| err.error(STORE, from.to_string()))?;
 
         Ok(())
     }
 
+    /// Make a Get User Delegation Key request
+    /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-user-delegation-key>
+    async fn get_user_delegation_key(
+        &self,
+        start: &DateTime<Utc>,
+        end: &DateTime<Utc>,
+    ) -> Result<UserDelegationKey> {
+        let credential = self.get_credential().await?;
+        let url = self.config.service.clone();
+
+        let start = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expiry = end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        let mut body = String::new();
+        body.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<KeyInfo>\n");
+        body.push_str(&format!(
+            "\t<Start>{start}</Start>\n\t<Expiry>{expiry}</Expiry>\n"
+        ));
+        body.push_str("</KeyInfo>");
+
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
+        let response = self
+            .client
+            .request(Method::POST, url)
+            .body(body)
+            .query(&[("restype", "service"), ("comp", "userdelegationkey")])
+            .with_azure_authorization(&credential, &self.config.account)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .idempotent(true)
+            .send()
+            .await
+            .context(DelegationKeyRequestSnafu)?
+            .bytes()
+            .await
+            .context(DelegationKeyResponseBodySnafu)?;
+
+        let response: UserDelegationKey =
+            quick_xml::de::from_reader(response.reader()).context(DelegationKeyResponseSnafu)?;
+
+        Ok(response)
+    }
+
+    /// Creat an AzureSigner for generating SAS tokens (pre-signed urls).
+    ///
+    /// Depending on the type of credential, this will either use the account key or a user delegation key.
+    /// Since delegation keys are acquired ad-hoc, the signer aloows for signing multiple urls with the same key.
+    pub async fn signer(&self, expires_in: Duration) -> Result<AzureSigner> {
+        let credential = self.get_credential().await?;
+        let signed_start = chrono::Utc::now();
+        let signed_expiry = signed_start + expires_in;
+        match credential.as_deref() {
+            Some(AzureCredential::BearerToken(_)) => {
+                let key = self
+                    .get_user_delegation_key(&signed_start, &signed_expiry)
+                    .await?;
+                let signing_key = AzureAccessKey::try_new(&key.value)?;
+                Ok(AzureSigner::new(
+                    signing_key,
+                    self.config.account.clone(),
+                    signed_start,
+                    signed_expiry,
+                    Some(key),
+                ))
+            }
+            Some(AzureCredential::AccessKey(key)) => Ok(AzureSigner::new(
+                key.to_owned(),
+                self.config.account.clone(),
+                signed_start,
+                signed_expiry,
+                None,
+            )),
+            None => Err(Error::SASwithSkipSignature.into()),
+            _ => Err(Error::SASforSASNotSupported.into()),
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn get_blob_tagging(&self, path: &Path) -> Result<Response> {
+        let credential = self.get_credential().await?;
+        let url = self.config.path_url(path);
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
+        let response = self
+            .client
+            .request(Method::GET, url)
+            .query(&[("comp", "tags")])
+            .with_azure_authorization(&credential, &self.config.account)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .send()
+            .await
+            .context(GetRequestSnafu {
+                path: path.as_ref(),
+            })?;
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl GetClient for AzureClient {
+    const STORE: &'static str = STORE;
+
+    const HEADER_CONFIG: HeaderConfig = HeaderConfig {
+        etag_required: true,
+        last_modified_required: true,
+        version_header: Some(VERSION_HEADER),
+        user_defined_metadata_prefix: Some(USER_DEFINED_METADATA_HEADER_PREFIX),
+    };
+
+    /// Make an Azure GET request
+    /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-blob>
+    /// <https://docs.microsoft.com/en-us/rest/api/storageservices/get-blob-properties>
+    async fn get_request(&self, path: &Path, options: GetOptions) -> Result<Response> {
+        // As of 2024-01-02, Azure does not support suffix requests,
+        // so we should fail fast here rather than sending one
+        if let Some(GetRange::Suffix(_)) = options.range.as_ref() {
+            return Err(crate::Error::NotSupported {
+                source: "Azure does not support suffix range requests".into(),
+            });
+        }
+
+        let credential = self.get_credential().await?;
+        let url = self.config.path_url(path);
+        let method = match options.head {
+            true => Method::HEAD,
+            false => Method::GET,
+        };
+
+        let mut builder = self
+            .client
+            .request(method, url)
+            .header(CONTENT_LENGTH, HeaderValue::from_static("0"))
+            .body(Bytes::new());
+
+        if let Some(v) = &options.version {
+            builder = builder.query(&[("versionid", v)])
+        }
+
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
+        let response = builder
+            .with_get_options(options)
+            .with_azure_authorization(&credential, &self.config.account)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .send()
+            .await
+            .context(GetRequestSnafu {
+                path: path.as_ref(),
+            })?;
+
+        match response.headers().get("x-ms-resource-type") {
+            Some(resource) if resource.as_ref() != b"file" => Err(crate::Error::NotFound {
+                path: path.to_string(),
+                source: format!(
+                    "Not a file, got x-ms-resource-type: {}",
+                    String::from_utf8_lossy(resource.as_ref())
+                )
+                .into(),
+            }),
+            _ => Ok(response),
+        }
+    }
+}
+
+#[async_trait]
+impl ListClient for AzureClient {
     /// Make an Azure List request <https://docs.microsoft.com/en-us/rest/api/storageservices/list-blobs>
     async fn list_request(
         &self,
         prefix: Option<&str>,
         delimiter: bool,
         token: Option<&str>,
+        offset: Option<&str>,
     ) -> Result<(ListResult, Option<String>)> {
+        assert!(offset.is_none()); // Not yet supported
+
         let credential = self.get_credential().await?;
         let url = self.config.path_url(&Path::default());
 
@@ -351,12 +623,18 @@ impl AzureClient {
             query.push(("marker", token))
         }
 
+        let sensitive = credential
+            .as_deref()
+            .map(|c| c.sensitive_request())
+            .unwrap_or_default();
         let response = self
             .client
             .request(Method::GET, url)
             .query(&query)
             .with_azure_authorization(&credential, &self.config.account)
-            .send_retry(&self.config.retry_config)
+            .retryable(&self.config.retry_config)
+            .sensitive(sensitive)
+            .send()
             .await
             .context(ListRequestSnafu)?
             .bytes()
@@ -364,27 +642,10 @@ impl AzureClient {
             .context(ListResponseBodySnafu)?;
 
         let mut response: ListResultInternal =
-            quick_xml::de::from_reader(response.reader())
-                .context(InvalidListResponseSnafu)?;
+            quick_xml::de::from_reader(response.reader()).context(InvalidListResponseSnafu)?;
         let token = response.next_marker.take();
 
-        Ok((response.try_into()?, token))
-    }
-
-    /// Perform a list operation automatically handling pagination
-    pub fn list_paginated(
-        &self,
-        prefix: Option<&Path>,
-        delimiter: bool,
-    ) -> BoxStream<'_, Result<ListResult>> {
-        let prefix = format_prefix(prefix);
-        stream_paginated(prefix, move |prefix, token| async move {
-            let (r, next_token) = self
-                .list_request(prefix.as_deref(), delimiter, token.as_deref())
-                .await?;
-            Ok((r, prefix, next_token))
-        })
-        .boxed()
+        Ok((to_list_result(response, prefix)?, token))
     }
 }
 
@@ -399,41 +660,41 @@ struct ListResultInternal {
     pub blobs: Blobs,
 }
 
-impl TryFrom<ListResultInternal> for ListResult {
-    type Error = crate::Error;
+fn to_list_result(value: ListResultInternal, prefix: Option<&str>) -> Result<ListResult> {
+    let prefix = prefix.unwrap_or_default();
+    let common_prefixes = value
+        .blobs
+        .blob_prefix
+        .into_iter()
+        .map(|x| Ok(Path::parse(x.name)?))
+        .collect::<Result<_>>()?;
 
-    fn try_from(value: ListResultInternal) -> Result<Self> {
-        let common_prefixes = value
-            .blobs
-            .blob_prefix
-            .unwrap_or_default()
-            .into_iter()
-            .map(|x| Ok(Path::parse(&x.name)?))
-            .collect::<Result<_>>()?;
-
-        let objects = value
-            .blobs
-            .blobs
-            .into_iter()
-            .map(ObjectMeta::try_from)
-            // Note: workaround for gen2 accounts with hierarchical namespaces. These accounts also
-            // return path segments as "directories". When we cant directories, its always via
-            // the BlobPrefix mechanics.
-            .filter_map_ok(|obj| if obj.size > 0 { Some(obj) } else { None })
-            .collect::<Result<_>>()?;
-
-        Ok(Self {
-            common_prefixes,
-            objects,
+    let objects = value
+        .blobs
+        .blobs
+        .into_iter()
+        // Note: Filters out directories from list results when hierarchical namespaces are
+        // enabled. When we want directories, its always via the BlobPrefix mechanics,
+        // and during lists we state that prefixes are evaluated on path segment basis.
+        .filter(|blob| {
+            !matches!(blob.properties.resource_type.as_ref(), Some(typ) if typ == "directory")
+                && blob.name.len() > prefix.len()
         })
-    }
+        .map(ObjectMeta::try_from)
+        .collect::<Result<_>>()?;
+
+    Ok(ListResult {
+        common_prefixes,
+        objects,
+    })
 }
 
 /// Collection of blobs and potentially shared prefixes returned from list requests.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct Blobs {
-    pub blob_prefix: Option<Vec<BlobPrefix>>,
+    #[serde(default)]
+    pub blob_prefix: Vec<BlobPrefix>,
     #[serde(rename = "Blob", default)]
     pub blobs: Vec<Blob>,
 }
@@ -465,6 +726,8 @@ impl TryFrom<Blob> for ObjectMeta {
             location: Path::parse(value.name)?,
             last_modified: value.properties.last_modified,
             size: value.properties.content_length as usize,
+            e_tag: value.properties.e_tag,
+            version: None, // For consistency with S3 and GCP which don't include this
         })
     }
 }
@@ -475,9 +738,8 @@ impl TryFrom<Blob> for ObjectMeta {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct BlobProperties {
-    #[serde(deserialize_with = "deserialize_http_date", rename = "Last-Modified")]
+    #[serde(deserialize_with = "deserialize_rfc1123", rename = "Last-Modified")]
     pub last_modified: DateTime<Utc>,
-    pub etag: String,
     #[serde(rename = "Content-Length")]
     pub content_length: u64,
     #[serde(rename = "Content-Type")]
@@ -486,16 +748,10 @@ struct BlobProperties {
     pub content_encoding: Option<String>,
     #[serde(rename = "Content-Language")]
     pub content_language: Option<String>,
-}
-
-// deserialize dates used in Azure payloads according to rfc1123
-fn deserialize_http_date<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    Utc.datetime_from_str(&s, RFC1123_FMT)
-        .map_err(serde::de::Error::custom)
+    #[serde(rename = "Etag")]
+    pub e_tag: Option<String>,
+    #[serde(rename = "ResourceType")]
+    pub resource_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,7 +790,7 @@ impl BlockList {
         for block_id in &self.blocks {
             let node = format!(
                 "\t<Uncommitted>{}</Uncommitted>\n",
-                base64::encode(block_id)
+                BASE64_STANDARD.encode(block_id)
             );
             s.push_str(&node);
         }
@@ -542,6 +798,18 @@ impl BlockList {
         s.push_str("</BlockList>");
         s
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub(crate) struct UserDelegationKey {
+    pub signed_oid: String,
+    pub signed_tid: String,
+    pub signed_start: String,
+    pub signed_expiry: String,
+    pub signed_service: String,
+    pub signed_version: String,
+    pub value: String,
 }
 
 #[cfg(test)]
@@ -701,8 +969,7 @@ mod tests {
     <NextMarker/>
 </EnumerationResults>";
 
-        let mut _list_blobs_response_internal: ListResultInternal =
-            quick_xml::de::from_str(S).unwrap();
+        let _list_blobs_response_internal: ListResultInternal = quick_xml::de::from_str(S).unwrap();
     }
 
     #[test]
@@ -721,5 +988,22 @@ mod tests {
         let res: &str = &blocks.to_xml();
 
         assert_eq!(res, S)
+    }
+
+    #[test]
+    fn test_delegated_key_response() {
+        const S: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<UserDelegationKey>
+    <SignedOid>String containing a GUID value</SignedOid>
+    <SignedTid>String containing a GUID value</SignedTid>
+    <SignedStart>String formatted as ISO date</SignedStart>
+    <SignedExpiry>String formatted as ISO date</SignedExpiry>
+    <SignedService>b</SignedService>
+    <SignedVersion>String specifying REST api version to use to create the user delegation key</SignedVersion>
+    <Value>String containing the user delegation key</Value>
+</UserDelegationKey>"#;
+
+        let _delegated_key_response_internal: UserDelegationKey =
+            quick_xml::de::from_str(S).unwrap();
     }
 }

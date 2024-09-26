@@ -17,6 +17,8 @@
 
 #[macro_use]
 extern crate criterion;
+use std::sync::Arc;
+
 use criterion::Criterion;
 
 extern crate arrow;
@@ -58,6 +60,46 @@ fn add_benchmark(c: &mut Criterion) {
     let v1 = create_string_array::<i32>(1024, 0.5);
     let v2 = create_string_array::<i32>(1024, 0.5);
     c.bench_function("concat str nulls 1024", |b| {
+        b.iter(|| bench_concat(&v1, &v2))
+    });
+
+    let v1 = create_string_array_with_len::<i32>(10, 0.0, 20);
+    let v1 = create_dict_from_values::<Int32Type>(1024, 0.0, &v1);
+    let v2 = create_string_array_with_len::<i32>(10, 0.0, 20);
+    let v2 = create_dict_from_values::<Int32Type>(1024, 0.0, &v2);
+    c.bench_function("concat str_dict 1024", |b| {
+        b.iter(|| bench_concat(&v1, &v2))
+    });
+
+    let v1 = create_string_array_with_len::<i32>(1024, 0.0, 20);
+    let v1 = create_sparse_dict_from_values::<Int32Type>(1024, 0.0, &v1, 10..20);
+    let v2 = create_string_array_with_len::<i32>(1024, 0.0, 20);
+    let v2 = create_sparse_dict_from_values::<Int32Type>(1024, 0.0, &v2, 30..40);
+    c.bench_function("concat str_dict_sparse 1024", |b| {
+        b.iter(|| bench_concat(&v1, &v2))
+    });
+
+    let v1 = create_string_array::<i32>(1024, 0.5);
+    let v2 = create_string_array::<i32>(1024, 0.5);
+    c.bench_function("concat str nulls 1024", |b| {
+        b.iter(|| bench_concat(&v1, &v2))
+    });
+
+    let v1 = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Int32, true)),
+        1024,
+        Arc::new(create_primitive_array::<Int32Type>(1024 * 1024, 0.0)),
+        None,
+    )
+    .unwrap();
+    let v2 = FixedSizeListArray::try_new(
+        Arc::new(Field::new("item", DataType::Int32, true)),
+        1024,
+        Arc::new(create_primitive_array::<Int32Type>(1024 * 1024, 0.0)),
+        None,
+    )
+    .unwrap();
+    c.bench_function("concat fixed size lists", |b| {
         b.iter(|| bench_concat(&v1, &v2))
     });
 }

@@ -32,6 +32,10 @@ pub trait Storage {
 
     /// Adds a new element, returning the key
     fn push(&mut self, value: &Self::Value) -> Self::Key;
+
+    /// Return an estimate of the memory used in this storage, in bytes
+    #[allow(dead_code)] // not used in parquet_derive, so is dead there
+    fn estimated_memory_size(&self) -> usize;
 }
 
 /// A generic value interner supporting various different [`Storage`]
@@ -82,12 +86,21 @@ impl<S: Storage> Interner<S> {
         }
     }
 
+    /// Return estimate of the memory used, in bytes
+    #[allow(dead_code)] // not used in parquet_derive, so is dead there
+    pub fn estimated_memory_size(&self) -> usize {
+        self.storage.estimated_memory_size() +
+            // estimate size of dedup hashmap as just th size of the keys
+            self.dedup.capacity() + std::mem::size_of::<S::Key>()
+    }
+
     /// Returns the storage for this interner
     pub fn storage(&self) -> &S {
         &self.storage
     }
 
     /// Unwraps the inner storage
+    #[cfg(feature = "arrow")]
     pub fn into_inner(self) -> S {
         self.storage
     }

@@ -15,8 +15,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
+//! Per-page encoding information.
+
 use crate::basic::{Encoding, PageType};
-use parquet_format::{
+use crate::errors::Result;
+use crate::format::{
     Encoding as TEncoding, PageEncodingStats as TPageEncodingStats, PageType as TPageType,
 };
 
@@ -32,16 +35,16 @@ pub struct PageEncodingStats {
 }
 
 /// Converts Thrift definition into `PageEncodingStats`.
-pub fn from_thrift(thrift_encoding_stats: &TPageEncodingStats) -> PageEncodingStats {
-    let page_type = PageType::from(thrift_encoding_stats.page_type);
-    let encoding = Encoding::from(thrift_encoding_stats.encoding);
+pub fn try_from_thrift(thrift_encoding_stats: &TPageEncodingStats) -> Result<PageEncodingStats> {
+    let page_type = PageType::try_from(thrift_encoding_stats.page_type)?;
+    let encoding = Encoding::try_from(thrift_encoding_stats.encoding)?;
     let count = thrift_encoding_stats.count;
 
-    PageEncodingStats {
+    Ok(PageEncodingStats {
         page_type,
         encoding,
         count,
-    }
+    })
 }
 
 /// Converts `PageEncodingStats` into Thrift definition.
@@ -60,7 +63,6 @@ pub fn to_thrift(encoding_stats: &PageEncodingStats) -> TPageEncodingStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::basic::{Encoding, PageType};
 
     #[test]
     fn test_page_encoding_stats_from_thrift() {
@@ -70,6 +72,6 @@ mod tests {
             count: 1,
         };
 
-        assert_eq!(from_thrift(&to_thrift(&stats)), stats);
+        assert_eq!(try_from_thrift(&to_thrift(&stats)).unwrap(), stats);
     }
 }
