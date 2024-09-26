@@ -414,24 +414,6 @@ where
         }
     }
 
-    /// Read the next page as a dictionary page. If the next page is not a dictionary page,
-    /// this will return an error.
-    fn read_dictionary_page(&mut self) -> Result<()> {
-        match self.page_reader.get_next_page()? {
-            Some(Page::DictionaryPage {
-                buf,
-                num_values,
-                encoding,
-                is_sorted,
-            }) => self
-                .values_decoder
-                .set_dict(buf, num_values, encoding, is_sorted),
-            _ => Err(ParquetError::General(
-                "Invalid page. Expecting dictionary page".to_string(),
-            )),
-        }
-    }
-
     /// Reads a new page and set up the decoders for levels, values or dictionary.
     /// Returns false if there's no page left.
     fn read_new_page(&mut self) -> Result<bool> {
