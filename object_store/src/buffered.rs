@@ -443,7 +443,7 @@ impl AsyncWrite for BufWriter {
                             ErrorKind::InvalidInput,
                             "Cannot shutdown a writer that has already been shut down",
                         )
-                    });
+                    })?;
                     self.state = BufWriterState::Flush(
                         async move {
                             upload.finish().await?;
