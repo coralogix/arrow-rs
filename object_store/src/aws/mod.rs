@@ -34,6 +34,7 @@ use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Method, StatusCode};
 use std::{sync::Arc, time::Duration};
+use tracing::info;
 use url::Url;
 
 use crate::aws::client::{RequestError, S3Client};
@@ -337,18 +338,21 @@ impl MultipartUpload for S3MultiPartUpload {
         let idx = self.part_idx;
         self.part_idx += 1;
         let state = Arc::clone(&self.state);
+        info!(?idx, path = ?state.location, "uploading part");
         Box::pin(async move {
             let part = state
                 .client
                 .put_part(&state.location, &state.upload_id, idx, data)
                 .await?;
             state.parts.put(idx, part);
+            info!(?idx, path = ?state.location, upload_id = state.upload_id, "uploaded part");
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
         let parts = self.state.parts.finish(self.part_idx)?;
+        info!(upload_id = self.state.upload_id, part_idx = self.part_idx, ?parts, location = ?self.state.location, "completing multipart upload");
 
         self.state
             .client
@@ -357,6 +361,7 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn abort(&mut self) -> Result<()> {
+        info!(upload_id = self.state.upload_id, part_idx = self.part_idx, location = ?self.state.location, "aborting multipart upload");
         self.state
             .client
             .request(Method::DELETE, &self.state.location)
