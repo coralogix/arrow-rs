@@ -334,10 +334,14 @@ struct UploadState {
 #[async_trait]
 impl MultipartUpload for S3MultiPartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let len = data.content_length();
         let idx = self.part_idx;
         self.part_idx += 1;
         let state = Arc::clone(&self.state);
-        println!("uploading part: {}, location: {:?}", idx, state.location);
+        println!(
+            "uploading part: {}, location: {:?}, size: {}",
+            idx, state.location, len
+        );
         Box::pin(async move {
             let part = state
                 .client
@@ -345,8 +349,8 @@ impl MultipartUpload for S3MultiPartUpload {
                 .await?;
             state.parts.put(idx, part);
             println!(
-                "uploaded part: {}, location: {:?}, upload_id: {}",
-                idx, state.location, state.upload_id
+                "uploaded part: {}, location: {:?}, upload_id: {}, size: {}",
+                idx, state.location, state.upload_id, len
             );
             Ok(())
         })
