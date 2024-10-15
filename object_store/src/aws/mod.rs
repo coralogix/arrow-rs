@@ -339,8 +339,8 @@ impl MultipartUpload for S3MultiPartUpload {
         self.part_idx += 1;
         let state = Arc::clone(&self.state);
         println!(
-            "uploading part: {}, location: {:?}, size: {}",
-            idx, state.location, len
+            "uploading part: {}, location: {:?}, size: {}, upload_id: {}",
+            idx, state.location, len, state.upload_id
         );
         Box::pin(async move {
             let part = state

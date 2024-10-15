@@ -561,6 +561,7 @@ impl S3Client {
         data: PutPayload,
     ) -> Result<PartId> {
         let part = (part_idx + 1).to_string();
+        let size = data.content_length();
 
         let response = self
             .request(Method::PUT, path)
@@ -571,7 +572,7 @@ impl S3Client {
             .await?;
 
         let content_id = get_etag(response.headers()).context(MetadataSnafu)?;
-        Ok(PartId { content_id })
+        Ok(PartId { content_id, size })
     }
 
     pub async fn complete_multipart(

@@ -409,6 +409,7 @@ impl GoogleCloudStorageClient {
             ("partNumber", &format!("{}", part_idx + 1)),
             ("uploadId", upload_id),
         ];
+        let size = data.content_length();
         let result = self
             .request(Method::PUT, path)
             .with_payload(data)
@@ -419,6 +420,7 @@ impl GoogleCloudStorageClient {
 
         Ok(PartId {
             content_id: result.e_tag.unwrap(),
+            size,
         })
     }
 

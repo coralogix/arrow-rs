@@ -31,6 +31,8 @@ use crate::{MultipartId, PutPayload, PutResult, Result};
 pub struct PartId {
     /// Id of this part
     pub content_id: String,
+    /// Size of this part
+    pub size: usize,
 }
 
 /// A low-level interface for interacting with multipart upload APIs

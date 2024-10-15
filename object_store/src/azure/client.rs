@@ -312,6 +312,7 @@ impl AzureClient {
     ) -> Result<PartId> {
         let content_id = format!("{part_idx:20}");
         let block_id = BASE64_STANDARD.encode(&content_id);
+        let size = payload.content_length();
 
         self.put_request(path, payload)
             .query(&[("comp", "block"), ("blockid", &block_id)])
@@ -319,7 +320,7 @@ impl AzureClient {
             .send()
             .await?;
 
-        Ok(PartId { content_id })
+        Ok(PartId { content_id, size })
     }
 
     /// PUT a block list <https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list>

@@ -42,7 +42,59 @@ impl Parts {
                 source: "Missing part".to_string().into(),
             });
         }
-        parts.sort_unstable_by_key(|(idx, _)| *idx);
+        sort(&mut parts);
         Ok(parts.drain(..).map(|(_, v)| v).collect())
+    }
+}
+
+fn sort(parts: &mut [(usize, PartId)]) {
+    parts.sort_unstable_by(|a, b| match (a, b) {
+        ((idx_a, part_a), (idx_b, part_b)) if part_a.size == part_b.size => idx_a.cmp(idx_b),
+        ((_, part_a), (_, part_b)) => part_b.size.cmp(&part_a.size),
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::multipart::PartId;
+
+    #[test]
+    fn test_sort() {
+        let mut parts = vec![
+            (
+                1,
+                PartId {
+                    content_id: "1".to_string(),
+                    size: 100,
+                },
+            ),
+            (
+                2,
+                PartId {
+                    content_id: "2".to_string(),
+                    size: 50,
+                },
+            ),
+            (
+                3,
+                PartId {
+                    content_id: "3".to_string(),
+                    size: 100,
+                },
+            ),
+            (
+                4,
+                PartId {
+                    content_id: "4".to_string(),
+                    size: 100,
+                },
+            ),
+        ];
+        super::sort(&mut parts);
+
+        assert_eq!(parts[0].1.content_id, "1");
+        assert_eq!(parts[1].1.content_id, "3");
+        assert_eq!(parts[2].1.content_id, "4");
+        assert_eq!(parts[3].1.content_id, "2");
     }
 }
