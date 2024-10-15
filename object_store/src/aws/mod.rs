@@ -33,6 +33,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Method, StatusCode};
+use std::cmp::Ordering;
 use std::{sync::Arc, time::Duration};
 use url::Url;
 
@@ -357,7 +358,7 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let parts = self.state.parts.finish(self.part_idx)?;
+        let parts = self.state.parts.finish_sorted_by(self.part_idx, sort)?;
         println!(
             "completing multipart upload, upload_id: {}, part_id: {}, location: {:?}, parts: {:?}",
             self.state.upload_id, self.part_idx, self.state.location, parts
@@ -420,6 +421,15 @@ impl MultipartStore for AmazonS3 {
             .send()
             .await?;
         Ok(())
+    }
+}
+
+// smaller parts last, everything else by index
+fn sort(a: &(usize, PartId), b: &(usize, PartId)) -> Ordering {
+    if a.1.size == b.1.size {
+        a.0.cmp(&b.0)
+    } else {
+        b.1.size.cmp(&a.1.size)
     }
 }
 
@@ -621,5 +631,45 @@ mod tests {
 
             store.delete(location).await.unwrap();
         }
+    }
+
+    #[test]
+    fn test_sort() {
+        let mut parts = [
+            (
+                1,
+                PartId {
+                    content_id: "1".to_string(),
+                    size: 100,
+                },
+            ),
+            (
+                2,
+                PartId {
+                    content_id: "2".to_string(),
+                    size: 50,
+                },
+            ),
+            (
+                3,
+                PartId {
+                    content_id: "3".to_string(),
+                    size: 100,
+                },
+            ),
+            (
+                4,
+                PartId {
+                    content_id: "4".to_string(),
+                    size: 100,
+                },
+            ),
+        ];
+        parts.sort_unstable_by(sort);
+
+        assert_eq!(parts[0].1.content_id, "1");
+        assert_eq!(parts[1].1.content_id, "3");
+        assert_eq!(parts[2].1.content_id, "4");
+        assert_eq!(parts[3].1.content_id, "2");
     }
 }

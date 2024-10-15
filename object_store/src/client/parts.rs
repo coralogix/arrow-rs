@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::cmp::Ordering;
+
 use crate::multipart::PartId;
 use parking_lot::Mutex;
 
@@ -35,6 +37,20 @@ impl Parts {
     ///
     /// `expected` is the number of parts expected in the final result
     pub(crate) fn finish(&self, expected: usize) -> crate::Result<Vec<PartId>> {
+        self.finish_sorted_by(expected, |(idx_a, _), (idx_b, _)| idx_a.cmp(idx_b))
+    }
+
+    /// Produce the final list of [`PartId`] ordered by sorting function
+    ///
+    /// `expected` is the number of parts expected in the final result
+    pub(crate) fn finish_sorted_by<F>(
+        &self,
+        expected: usize,
+        sort_by: F,
+    ) -> crate::Result<Vec<PartId>>
+    where
+        F: FnMut(&(usize, PartId), &(usize, PartId)) -> Ordering,
+    {
         let mut parts = self.0.lock();
         if parts.len() != expected {
             return Err(crate::Error::Generic {
@@ -42,59 +58,7 @@ impl Parts {
                 source: "Missing part".to_string().into(),
             });
         }
-        sort(&mut parts);
+        parts.sort_unstable_by(sort_by);
         Ok(parts.drain(..).map(|(_, v)| v).collect())
-    }
-}
-
-fn sort(parts: &mut [(usize, PartId)]) {
-    parts.sort_unstable_by(|a, b| match (a, b) {
-        ((idx_a, part_a), (idx_b, part_b)) if part_a.size == part_b.size => idx_a.cmp(idx_b),
-        ((_, part_a), (_, part_b)) => part_b.size.cmp(&part_a.size),
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::multipart::PartId;
-
-    #[test]
-    fn test_sort() {
-        let mut parts = vec![
-            (
-                1,
-                PartId {
-                    content_id: "1".to_string(),
-                    size: 100,
-                },
-            ),
-            (
-                2,
-                PartId {
-                    content_id: "2".to_string(),
-                    size: 50,
-                },
-            ),
-            (
-                3,
-                PartId {
-                    content_id: "3".to_string(),
-                    size: 100,
-                },
-            ),
-            (
-                4,
-                PartId {
-                    content_id: "4".to_string(),
-                    size: 100,
-                },
-            ),
-        ];
-        super::sort(&mut parts);
-
-        assert_eq!(parts[0].1.content_id, "1");
-        assert_eq!(parts[1].1.content_id, "3");
-        assert_eq!(parts[2].1.content_id, "4");
-        assert_eq!(parts[3].1.content_id, "2");
     }
 }
