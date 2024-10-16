@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::cmp::Ordering;
-
 use crate::multipart::PartId;
 use parking_lot::Mutex;
 
@@ -37,20 +35,6 @@ impl Parts {
     ///
     /// `expected` is the number of parts expected in the final result
     pub(crate) fn finish(&self, expected: usize) -> crate::Result<Vec<PartId>> {
-        self.finish_sorted_by(expected, |(idx_a, _), (idx_b, _)| idx_a.cmp(idx_b))
-    }
-
-    /// Produce the final list of [`PartId`] ordered by sorting function
-    ///
-    /// `expected` is the number of parts expected in the final result
-    pub(crate) fn finish_sorted_by<F>(
-        &self,
-        expected: usize,
-        sort_by: F,
-    ) -> crate::Result<Vec<PartId>>
-    where
-        F: FnMut(&(usize, PartId), &(usize, PartId)) -> Ordering,
-    {
         let mut parts = self.0.lock();
         if parts.len() != expected {
             return Err(crate::Error::Generic {
@@ -58,7 +42,7 @@ impl Parts {
                 source: "Missing part".to_string().into(),
             });
         }
-        parts.sort_unstable_by(sort_by);
+        parts.sort_unstable_by_key(|(idx, _)| *idx);
         Ok(parts.drain(..).map(|(_, v)| v).collect())
     }
 }

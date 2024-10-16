@@ -416,14 +416,12 @@ impl MultipartStore for InMemory {
     ) -> Result<PartId> {
         let mut storage = self.storage.write();
         let upload = storage.upload_mut(id)?;
-        let size = payload.content_length();
         if part_idx <= upload.parts.len() {
             upload.parts.resize(part_idx + 1, None);
         }
         upload.parts[part_idx] = Some(payload.into());
         Ok(PartId {
             content_id: Default::default(),
-            size,
         })
     }
 
