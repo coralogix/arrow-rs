@@ -1391,8 +1391,8 @@ mod tests {
             .await
             .unwrap();
 
-        write.put_part("foo".into()).await.unwrap();
-        write.complete().await.unwrap();
+        write.put_part(0, "foo".into()).await.unwrap();
+        write.complete(1).await.unwrap();
 
         let buf_path = Path::from("tag_test_buf");
         let mut buf = BufWriter::new(storage, buf_path.clone()).with_tags(tag_set);

@@ -101,7 +101,6 @@ impl ObjectStore for MicrosoftAzure {
         opts: PutMultipartOpts,
     ) -> Result<Box<dyn MultipartUpload>> {
         Ok(Box::new(AzureMultiPartUpload {
-            part_idx: 0,
             opts,
             state: Arc::new(UploadState {
                 client: Arc::clone(&self.client),
@@ -199,7 +198,6 @@ impl Signer for MicrosoftAzure {
 /// abort -> No equivalent; blocks are simply dropped after 7 days
 #[derive(Debug)]
 struct AzureMultiPartUpload {
-    part_idx: usize,
     state: Arc<UploadState>,
     opts: PutMultipartOpts,
 }
@@ -213,9 +211,7 @@ struct UploadState {
 
 #[async_trait]
 impl MultipartUpload for AzureMultiPartUpload {
-    fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let idx = self.part_idx;
-        self.part_idx += 1;
+    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             let part = state.client.put_block(&state.location, idx, data).await?;
@@ -224,8 +220,8 @@ impl MultipartUpload for AzureMultiPartUpload {
         })
     }
 
-    async fn complete(&mut self) -> Result<PutResult> {
-        let parts = self.state.parts.finish(self.part_idx)?;
+    async fn complete(&mut self, idx: usize) -> Result<PutResult> {
+        let parts = self.state.parts.finish(idx)?;
 
         self.state
             .client

@@ -790,7 +790,7 @@ impl LocalUpload {
 
 #[async_trait]
 impl MultipartUpload for LocalUpload {
-    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+    fn put_part(&mut self, _idx: usize, data: PutPayload) -> UploadPart {
         let offset = self.offset;
         self.offset += data.content_length() as u64;
 
@@ -809,7 +809,7 @@ impl MultipartUpload for LocalUpload {
         .boxed()
     }
 
-    async fn complete(&mut self) -> Result<PutResult> {
+    async fn complete(&mut self, _num_parts: usize) -> Result<PutResult> {
         let src = self.src.take().context(AbortedSnafu)?;
         let s = Arc::clone(&self.state);
         maybe_spawn_blocking(move || {
@@ -1097,9 +1097,9 @@ mod tests {
             // Can't use stream_get test as WriteMultipart uses a tokio JoinSet
             let p = Path::from("manual_upload");
             let mut upload = integration.put_multipart(&p).await.unwrap();
-            upload.put_part("123".into()).await.unwrap();
-            upload.put_part("45678".into()).await.unwrap();
-            let r = upload.complete().await.unwrap();
+            upload.put_part(0, "123".into()).await.unwrap();
+            upload.put_part(1, "45678".into()).await.unwrap();
+            let r = upload.complete(2).await.unwrap();
 
             let get = integration.get(&p).await.unwrap();
             assert_eq!(get.meta.e_tag.as_ref().unwrap(), r.e_tag.as_ref().unwrap());
@@ -1406,10 +1406,10 @@ mod tests {
 
         let data = PutPayload::from("arbitrary data");
         let mut u1 = integration.put_multipart(&location).await.unwrap();
-        u1.put_part(data.clone()).await.unwrap();
+        u1.put_part(0, data.clone()).await.unwrap();
 
         let mut u2 = integration.put_multipart(&location).await.unwrap();
-        u2.put_part(data).await.unwrap();
+        u2.put_part(1, data).await.unwrap();
 
         let list = flatten_list_stream(&integration, None).await.unwrap();
         assert_eq!(list.len(), 0);
@@ -1566,7 +1566,7 @@ mod not_wasm_tests {
         let location = Path::from("some_file");
         let data = PutPayload::from_static(b"hello");
         let mut upload = integration.put_multipart(&location).await.unwrap();
-        upload.put_part(data).await.unwrap();
+        upload.put_part(0, data).await.unwrap();
 
         let file_count = std::fs::read_dir(root.path()).unwrap().count();
         assert_eq!(file_count, 1);
