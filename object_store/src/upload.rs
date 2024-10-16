@@ -176,6 +176,10 @@ impl WriteMultipart {
     /// Back pressure can optionally be applied to producers by calling
     /// [`Self::wait_for_capacity`] prior to calling this method
     pub fn write(&mut self, mut buf: &[u8]) {
+        println!(
+            "WriteMultipart::write writting chunk of {} bytes",
+            buf.len()
+        );
         while !buf.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             let to_read = buf.len().min(remaining);
@@ -196,6 +200,7 @@ impl WriteMultipart {
     ///
     /// See [`Self::write`] for information on backpressure
     pub fn put(&mut self, mut bytes: Bytes) {
+        println!("WriteMultipart::put putting chunk of {} bytes", bytes.len());
         while !bytes.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             if bytes.len() < remaining {
@@ -221,6 +226,10 @@ impl WriteMultipart {
     /// Flush final chunk, and await completion of all in-flight requests
     pub async fn finish(mut self) -> Result<PutResult> {
         if !self.buffer.is_empty() {
+            println!(
+                "WriteMultipart::finish: flushing final chunk of {} bytes",
+                self.buffer.content_length()
+            );
             let part = std::mem::take(&mut self.buffer);
             self.put_part(part.into())
         }

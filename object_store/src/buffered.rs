@@ -363,6 +363,7 @@ impl AsyncWrite for BufWriter {
     ) -> Poll<Result<usize, Error>> {
         let cap = self.capacity;
         let max_concurrency = self.max_concurrency;
+        println!("BufWriter::poll_write writing chunk of {} bytes", buf.len());
         loop {
             return match &mut self.state {
                 BufWriterState::Write(Some(write)) => {
@@ -390,6 +391,7 @@ impl AsyncWrite for BufWriter {
                             let upload = store.put_multipart_opts(&path, opts).await?;
                             let mut chunked = WriteMultipart::new_with_chunk_size(upload, cap);
                             for chunk in buffer.freeze() {
+                                println!("putting {} bytes", chunk.len());
                                 chunked.put(chunk);
                             }
                             Ok(chunked)
