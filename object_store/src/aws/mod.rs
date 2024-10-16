@@ -352,11 +352,11 @@ impl MultipartUpload for S3MultiPartUpload {
         })
     }
 
-    async fn complete(&mut self, idx: usize) -> Result<PutResult> {
-        let parts = self.state.parts.finish(idx)?;
+    async fn complete(&mut self, num_parts: usize) -> Result<PutResult> {
+        let parts = self.state.parts.finish(num_parts)?;
         println!(
             "completing multipart upload, upload_id: {}, part_id: {}, location: {:?}, parts: {:?}",
-            self.state.upload_id, idx, self.state.location, parts
+            self.state.upload_id, num_parts, self.state.location, parts
         );
 
         self.state
