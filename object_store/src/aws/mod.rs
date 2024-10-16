@@ -335,9 +335,9 @@ struct UploadState {
 #[async_trait]
 impl MultipartUpload for S3MultiPartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let len = data.content_length();
         let idx = self.part_idx;
         self.part_idx += 1;
+        let len = data.content_length();
         let state = Arc::clone(&self.state);
         println!(
             "uploading part: {}, location: {:?}, size: {}, upload_id: {}",
@@ -358,7 +358,7 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let parts = self.state.parts.finish_sorted_by(self.part_idx, sort)?;
+        let parts = self.state.parts.finish(self.part_idx)?;
         println!(
             "completing multipart upload, upload_id: {}, part_id: {}, location: {:?}, parts: {:?}",
             self.state.upload_id, self.part_idx, self.state.location, parts
@@ -424,6 +424,7 @@ impl MultipartStore for AmazonS3 {
     }
 }
 
+#[allow(unused)]
 // smaller parts last, everything else by index
 fn sort(a: &(usize, PartId), b: &(usize, PartId)) -> Ordering {
     if a.1.size == b.1.size {
