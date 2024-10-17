@@ -202,6 +202,7 @@ impl WriteMultipart {
     ///
     /// See [`Self::write`] for information on backpressure
     pub fn put(&mut self, mut bytes: Bytes) {
+        let len = bytes.len();
         while !bytes.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             if bytes.len() < remaining {
@@ -212,7 +213,7 @@ impl WriteMultipart {
             let buffer = std::mem::take(&mut self.buffer);
             self.put_part(buffer.into())
         }
-        println!("WriteMultipart::put put chunk of {} bytes", bytes.len());
+        println!("WriteMultipart::put put chunk of {} bytes", len);
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
