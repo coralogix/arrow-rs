@@ -180,6 +180,7 @@ impl WriteMultipart {
     /// Back pressure can optionally be applied to producers by calling
     /// [`Self::wait_for_capacity`] prior to calling this method
     pub fn write(&mut self, mut buf: &[u8]) {
+        let len = buf.len();
         while !buf.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             let to_read = buf.len().min(remaining);
@@ -190,7 +191,7 @@ impl WriteMultipart {
             }
             buf = &buf[to_read..]
         }
-        println!("WriteMultipart::write write chunk of {} bytes", buf.len());
+        println!("WriteMultipart::write write chunk of {} bytes", len);
     }
 
     /// Put a chunk of data into this [`WriteMultipart`] without copying
