@@ -154,6 +154,10 @@ impl WriteMultipart {
         while !self.tasks.is_empty() && self.tasks.len() >= max_concurrency {
             ready!(self.tasks.poll_join_next(cx)).unwrap()??
         }
+        println!(
+            "WriteMultipart::poll_for_capacity ready for {}",
+            max_concurrency
+        );
         Poll::Ready(Ok(()))
     }
 
@@ -176,10 +180,6 @@ impl WriteMultipart {
     /// Back pressure can optionally be applied to producers by calling
     /// [`Self::wait_for_capacity`] prior to calling this method
     pub fn write(&mut self, mut buf: &[u8]) {
-        println!(
-            "WriteMultipart::write writting chunk of {} bytes",
-            buf.len()
-        );
         while !buf.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             let to_read = buf.len().min(remaining);
@@ -190,6 +190,7 @@ impl WriteMultipart {
             }
             buf = &buf[to_read..]
         }
+        println!("WriteMultipart::write write chunk of {} bytes", buf.len());
     }
 
     /// Put a chunk of data into this [`WriteMultipart`] without copying
@@ -200,7 +201,6 @@ impl WriteMultipart {
     ///
     /// See [`Self::write`] for information on backpressure
     pub fn put(&mut self, mut bytes: Bytes) {
-        println!("WriteMultipart::put putting chunk of {} bytes", bytes.len());
         while !bytes.is_empty() {
             let remaining = self.chunk_size - self.buffer.content_length();
             if bytes.len() < remaining {
@@ -211,10 +211,16 @@ impl WriteMultipart {
             let buffer = std::mem::take(&mut self.buffer);
             self.put_part(buffer.into())
         }
+        println!("WriteMultipart::put put chunk of {} bytes", bytes.len());
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
+        let len = part.content_length();
         self.tasks.spawn(self.upload.put_part(part));
+        println!(
+            "WriteMultipart::put_part spawned task for part of size: {}",
+            len
+        );
     }
 
     /// Abort this upload, attempting to clean up any successfully uploaded parts
@@ -226,12 +232,13 @@ impl WriteMultipart {
     /// Flush final chunk, and await completion of all in-flight requests
     pub async fn finish(mut self) -> Result<PutResult> {
         if !self.buffer.is_empty() {
+            let len = self.buffer.content_length();
+            let part = std::mem::take(&mut self.buffer);
+            self.put_part(part.into());
             println!(
                 "WriteMultipart::finish: flushing final chunk of {} bytes",
-                self.buffer.content_length()
+                len
             );
-            let part = std::mem::take(&mut self.buffer);
-            self.put_part(part.into())
         }
 
         self.wait_for_capacity(0).await?;
@@ -242,7 +249,10 @@ impl WriteMultipart {
                 self.upload.abort().await?;
                 Err(e)
             }
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                println!("WriteMultipart::finish: done");
+                Ok(result)
+            }
         }
     }
 }
