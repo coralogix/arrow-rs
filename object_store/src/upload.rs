@@ -223,7 +223,8 @@ impl WriteMultipart {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        self.tasks.spawn(self.upload.put_part(part));
+        let fut = self.upload.put_part(part);
+        self.tasks.spawn(fut);
         println!(
             "WriteMultipart::put_part spawned task for part of size: {}, time: {}",
             len, now
