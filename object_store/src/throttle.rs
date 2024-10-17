@@ -377,17 +377,17 @@ struct ThrottledUpload {
 
 #[async_trait]
 impl MultipartUpload for ThrottledUpload {
-    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let duration = self.sleep;
-        let put = self.upload.put_part(idx, data);
+        let put = self.upload.put_part(data);
         Box::pin(async move {
             sleep(duration).await;
             put.await
         })
     }
 
-    async fn complete(&mut self, num_parts: usize) -> Result<PutResult> {
-        self.upload.complete(num_parts).await
+    async fn complete(&mut self) -> Result<PutResult> {
+        self.upload.complete().await
     }
 
     async fn abort(&mut self) -> Result<()> {

@@ -251,8 +251,8 @@ impl LimitUpload {
 
 #[async_trait]
 impl MultipartUpload for LimitUpload {
-    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart {
-        let upload = self.upload.put_part(idx, data);
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let upload = self.upload.put_part(data);
         let s = Arc::clone(&self.semaphore);
         Box::pin(async move {
             let _permit = s.acquire().await.unwrap();
@@ -260,9 +260,9 @@ impl MultipartUpload for LimitUpload {
         })
     }
 
-    async fn complete(&mut self, num_parts: usize) -> Result<PutResult> {
+    async fn complete(&mut self) -> Result<PutResult> {
         let _permit = self.semaphore.acquire().await.unwrap();
-        self.upload.complete(num_parts).await
+        self.upload.complete().await
     }
 
     async fn abort(&mut self) -> Result<()> {

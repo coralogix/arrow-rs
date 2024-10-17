@@ -497,8 +497,8 @@ pub async fn put_get_attributes(integration: &dyn ObjectStore) {
     let opts = attributes.clone().into();
     match integration.put_multipart_opts(&path, opts).await {
         Ok(mut w) => {
-            w.put_part(0, "foo".into()).await.unwrap();
-            w.complete(1).await.unwrap();
+            w.put_part("foo".into()).await.unwrap();
+            w.complete().await.unwrap();
 
             let r = integration.get(&path).await.unwrap();
             assert_eq!(r.attributes, attributes);
@@ -755,7 +755,7 @@ pub async fn stream_get(storage: &DynObjectStore) {
     let data = get_chunks(5 * 1024 * 1024, 3);
     let bytes_expected = data.concat();
     let mut upload = storage.put_multipart(&location).await.unwrap();
-    let uploads = data.into_iter().map(|x| upload.put_part(0, x.into()));
+    let uploads = data.into_iter().map(|x| upload.put_part(x.into()));
     futures::future::try_join_all(uploads).await.unwrap();
 
     // Object should not yet exist in store
@@ -772,7 +772,7 @@ pub async fn stream_get(storage: &DynObjectStore) {
     let result = storage.list_with_delimiter(None).await.unwrap();
     assert_eq!(&result.objects, &[]);
 
-    upload.complete(1).await.unwrap();
+    upload.complete().await.unwrap();
 
     let bytes_written = storage.get(&location).await.unwrap().bytes().await.unwrap();
     assert_eq!(bytes_expected, bytes_written);
@@ -826,7 +826,7 @@ pub async fn stream_get(storage: &DynObjectStore) {
     // We can abort an in-progress write
     let mut upload = storage.put_multipart(&location).await.unwrap();
     upload
-        .put_part(0, data.first().unwrap().clone().into())
+        .put_part(data.first().unwrap().clone().into())
         .await
         .unwrap();
 

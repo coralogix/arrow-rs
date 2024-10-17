@@ -64,7 +64,7 @@ pub trait MultipartUpload: Send + std::fmt::Debug {
     /// ```
     ///
     /// [R2]: https://developers.cloudflare.com/r2/objects/multipart-objects/#limitations
-    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart;
+    fn put_part(&mut self, data: PutPayload) -> UploadPart;
 
     /// Complete the multipart upload
     ///
@@ -72,7 +72,7 @@ pub trait MultipartUpload: Send + std::fmt::Debug {
     /// all [`UploadPart`] returned by [`MultipartUpload::put_part`] to completion. Additionally,
     /// it is implementation defined behaviour to call [`MultipartUpload::complete`]
     /// on an already completed or aborted [`MultipartUpload`].
-    async fn complete(&mut self, num_parts: usize) -> Result<PutResult>;
+    async fn complete(&mut self) -> Result<PutResult>;
 
     /// Abort the multipart upload
     ///
@@ -94,12 +94,12 @@ pub trait MultipartUpload: Send + std::fmt::Debug {
 
 #[async_trait]
 impl<W: MultipartUpload + ?Sized> MultipartUpload for Box<W> {
-    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart {
-        (**self).put_part(idx, data)
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        (**self).put_part(data)
     }
 
-    async fn complete(&mut self, num_parts: usize) -> Result<PutResult> {
-        (**self).complete(num_parts).await
+    async fn complete(&mut self) -> Result<PutResult> {
+        (**self).complete().await
     }
 
     async fn abort(&mut self) -> Result<()> {
@@ -118,8 +118,6 @@ impl<W: MultipartUpload + ?Sized> MultipartUpload for Box<W> {
 /// [`Sink`]: futures::sink::Sink
 #[derive(Debug)]
 pub struct WriteMultipart {
-    idx: usize,
-
     upload: Box<dyn MultipartUpload>,
 
     buffer: PutPayloadMut,
@@ -138,7 +136,6 @@ impl WriteMultipart {
     /// Create a new [`WriteMultipart`] that will upload in fixed `chunk_size` sized chunks
     pub fn new_with_chunk_size(upload: Box<dyn MultipartUpload>, chunk_size: usize) -> Self {
         Self {
-            idx: 0,
             upload,
             chunk_size,
             buffer: PutPayloadMut::new(),
@@ -217,9 +214,7 @@ impl WriteMultipart {
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
-        let idx = self.idx;
-        self.idx += 1;
-        self.tasks.spawn(self.upload.put_part(idx, part));
+        self.tasks.spawn(self.upload.put_part(part));
     }
 
     /// Abort this upload, attempting to clean up any successfully uploaded parts
@@ -241,7 +236,7 @@ impl WriteMultipart {
 
         self.wait_for_capacity(0).await?;
 
-        match self.upload.complete(self.idx).await {
+        match self.upload.complete().await {
             Err(e) => {
                 self.tasks.shutdown().await;
                 self.upload.abort().await?;
@@ -295,12 +290,12 @@ mod tests {
 
     #[async_trait]
     impl MultipartUpload for InstrumentedUpload {
-        fn put_part(&mut self, _idx: usize, data: PutPayload) -> UploadPart {
+        fn put_part(&mut self, data: PutPayload) -> UploadPart {
             self.chunks.lock().push(data);
             futures::future::ready(Ok(())).boxed()
         }
 
-        async fn complete(&mut self, _idx: usize) -> Result<PutResult> {
+        async fn complete(&mut self) -> Result<PutResult> {
             Ok(PutResult {
                 e_tag: None,
                 version: None,

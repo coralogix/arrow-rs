@@ -215,6 +215,7 @@ impl ObjectStore for AmazonS3 {
         let upload_id = self.client.create_multipart(location, opts).await?;
 
         Ok(Box::new(S3MultiPartUpload {
+            part_idx: 0,
             state: Arc::new(UploadState {
                 client: Arc::clone(&self.client),
                 location: location.clone(),
@@ -318,6 +319,7 @@ impl ObjectStore for AmazonS3 {
 
 #[derive(Debug)]
 struct S3MultiPartUpload {
+    part_idx: usize,
     state: Arc<UploadState>,
 }
 
@@ -331,7 +333,9 @@ struct UploadState {
 
 #[async_trait]
 impl MultipartUpload for S3MultiPartUpload {
-    fn put_part(&mut self, idx: usize, data: PutPayload) -> UploadPart {
+    fn put_part(&mut self, data: PutPayload) -> UploadPart {
+        let idx = self.part_idx;
+        self.part_idx += 1;
         let len = data.content_length();
         let state = Arc::clone(&self.state);
         println!(
@@ -352,11 +356,11 @@ impl MultipartUpload for S3MultiPartUpload {
         })
     }
 
-    async fn complete(&mut self, num_parts: usize) -> Result<PutResult> {
-        let parts = self.state.parts.finish(num_parts)?;
+    async fn complete(&mut self) -> Result<PutResult> {
+        let parts = self.state.parts.finish(self.part_idx)?;
         println!(
             "completing multipart upload, upload_id: {}, part_id: {}, location: {:?}, parts: {:?}",
-            self.state.upload_id, num_parts, self.state.location, parts
+            self.state.upload_id, self.part_idx, self.state.location, parts
         );
 
         self.state
@@ -367,8 +371,8 @@ impl MultipartUpload for S3MultiPartUpload {
 
     async fn abort(&mut self) -> Result<()> {
         println!(
-            "aborting multipart upload, upload_id: {}, location: {:?}",
-            self.state.upload_id, self.state.location
+            "aborting multipart upload, upload_id: {}, part_id: {}, location: {:?}",
+            self.state.upload_id, self.part_idx, self.state.location
         );
         self.state
             .client
@@ -598,8 +602,8 @@ mod tests {
         store.copy(&locations[0], &locations[1]).await.unwrap();
 
         let mut upload = store.put_multipart(&locations[2]).await.unwrap();
-        upload.put_part(1, data.clone()).await.unwrap();
-        upload.complete(1).await.unwrap();
+        upload.put_part(data.clone()).await.unwrap();
+        upload.complete().await.unwrap();
 
         for location in &locations {
             let res = store

@@ -499,12 +499,12 @@ struct InMemoryUpload {
 
 #[async_trait]
 impl MultipartUpload for InMemoryUpload {
-    fn put_part(&mut self, _idx: usize, payload: PutPayload) -> UploadPart {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
         self.parts.push(payload);
         Box::pin(futures::future::ready(Ok(())))
     }
 
-    async fn complete(&mut self, _num_parts: usize) -> Result<PutResult> {
+    async fn complete(&mut self) -> Result<PutResult> {
         let cap = self.parts.iter().map(|x| x.content_length()).sum();
         let mut buf = Vec::with_capacity(cap);
         let parts = self.parts.iter().flatten();

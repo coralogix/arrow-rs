@@ -102,6 +102,7 @@ impl GoogleCloudStorage {
 #[derive(Debug)]
 struct GCSMultipartUpload {
     state: Arc<UploadState>,
+    part_idx: usize,
 }
 
 #[derive(Debug)]
@@ -114,7 +115,9 @@ struct UploadState {
 
 #[async_trait]
 impl MultipartUpload for GCSMultipartUpload {
-    fn put_part(&mut self, idx: usize, payload: PutPayload) -> UploadPart {
+    fn put_part(&mut self, payload: PutPayload) -> UploadPart {
+        let idx = self.part_idx;
+        self.part_idx += 1;
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             let part = state
@@ -126,8 +129,8 @@ impl MultipartUpload for GCSMultipartUpload {
         })
     }
 
-    async fn complete(&mut self, idx: usize) -> Result<PutResult> {
-        let parts = self.state.parts.finish(idx)?;
+    async fn complete(&mut self) -> Result<PutResult> {
+        let parts = self.state.parts.finish(self.part_idx)?;
 
         self.state
             .client
@@ -162,6 +165,7 @@ impl ObjectStore for GoogleCloudStorage {
         let upload_id = self.client.multipart_initiate(location, opts).await?;
 
         Ok(Box::new(GCSMultipartUpload {
+            part_idx: 0,
             state: Arc::new(UploadState {
                 client: Arc::clone(&self.client),
                 path: location.clone(),
