@@ -419,6 +419,7 @@ impl AsyncWrite for BufWriter {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        println!("BufWriter::poll_shutdown");
         loop {
             match &mut self.state {
                 BufWriterState::Prepare(f) => {
