@@ -33,6 +33,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Method, StatusCode};
+use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 use url::Url;
 
@@ -336,12 +337,16 @@ impl MultipartUpload for S3MultiPartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
         let idx = self.part_idx;
         self.part_idx += 1;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
         let len = data.content_length();
-        let state = Arc::clone(&self.state);
         println!(
-            "uploading part: {}, location: {:?}, size: {}, upload_id: {}",
-            idx, state.location, len, state.upload_id
+            "uploading part: {}, location: {:?}, size: {}, upload_id: {}, timestamp: {}",
+            idx, self.state.location, len, self.state.upload_id, now
         );
+        let state = Arc::clone(&self.state);
         Box::pin(async move {
             let part = state
                 .client

@@ -16,6 +16,7 @@
 // under the License.
 
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 
 use crate::{PutPayload, PutPayloadMut, PutResult, Result};
 use async_trait::async_trait;
@@ -218,10 +219,14 @@ impl WriteMultipart {
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
         let len = part.content_length();
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
         self.tasks.spawn(self.upload.put_part(part));
         println!(
-            "WriteMultipart::put_part spawned task for part of size: {}",
-            len
+            "WriteMultipart::put_part spawned task for part of size: {}, time: {}",
+            len, now
         );
     }
 
