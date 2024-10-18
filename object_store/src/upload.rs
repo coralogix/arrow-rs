@@ -209,7 +209,9 @@ impl WriteMultipart {
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
-        self.tasks.spawn(self.upload.put_part(part));
+        // This is safe because we are the only ones with a reference to the upload
+        let task = self.upload.put_part(part);
+        self.tasks.spawn(task);
     }
 
     /// Abort this upload, attempting to clean up any successfully uploaded parts
