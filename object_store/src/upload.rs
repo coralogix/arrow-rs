@@ -209,7 +209,8 @@ impl WriteMultipart {
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
-        // This is safe because we are the only ones with a reference to the upload
+        // appereantly doing this inside spawn call, causes a index assignment race,
+        // to prevent it from happenin we do it here before spawn to ensure that the index is assigned correctly
         let task = self.upload.put_part(part);
         self.tasks.spawn(task);
     }
