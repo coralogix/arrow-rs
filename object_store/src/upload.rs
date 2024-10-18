@@ -218,11 +218,11 @@ impl WriteMultipart {
     }
 
     pub(crate) fn put_part(&mut self, part: PutPayload) {
-        let len = part.content_length();
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_micros();
+        let len = part.content_length();
         let fut = self.upload.put_part(part);
         self.tasks.spawn(fut);
         println!(

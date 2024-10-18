@@ -335,12 +335,12 @@ struct UploadState {
 #[async_trait]
 impl MultipartUpload for S3MultiPartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let idx = self.part_idx;
-        self.part_idx += 1;
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_micros();
+        let idx = self.part_idx;
+        self.part_idx += 1;
         let len = data.content_length();
         println!(
             "uploading part: {}, location: {:?}, size: {}, upload_id: {}, timestamp: {}",
