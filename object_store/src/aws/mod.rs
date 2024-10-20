@@ -33,6 +33,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Method, StatusCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{sync::Arc, time::Duration};
 use url::Url;
@@ -216,7 +217,7 @@ impl ObjectStore for AmazonS3 {
         let upload_id = self.client.create_multipart(location, opts).await?;
 
         Ok(Box::new(S3MultiPartUpload {
-            part_idx: 0,
+            part_idx: AtomicUsize::new(0),
             state: Arc::new(UploadState {
                 client: Arc::clone(&self.client),
                 location: location.clone(),
@@ -320,7 +321,7 @@ impl ObjectStore for AmazonS3 {
 
 #[derive(Debug)]
 struct S3MultiPartUpload {
-    part_idx: usize,
+    part_idx: AtomicUsize,
     state: Arc<UploadState>,
 }
 
@@ -339,8 +340,7 @@ impl MultipartUpload for S3MultiPartUpload {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_micros();
-        let idx = self.part_idx;
-        self.part_idx += 1;
+        let idx = self.part_idx.fetch_add(1, Ordering::AcqRel);
         let len = data.content_length();
         println!(
             "uploading part: {}, location: {:?}, size: {}, upload_id: {}, timestamp: {}",
@@ -362,10 +362,11 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let parts = self.state.parts.finish(self.part_idx)?;
+        let idx = self.part_idx.load(Ordering::Acquire);
+        let parts = self.state.parts.finish(idx)?;
         println!(
             "completing multipart upload, upload_id: {}, part_id: {}, location: {:?}, parts: {:?}",
-            self.state.upload_id, self.part_idx, self.state.location, parts
+            self.state.upload_id, idx, self.state.location, parts
         );
 
         self.state
@@ -375,9 +376,10 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn abort(&mut self) -> Result<()> {
+        let idx = self.part_idx.load(Ordering::Acquire);
         println!(
             "aborting multipart upload, upload_id: {}, part_id: {}, location: {:?}",
-            self.state.upload_id, self.part_idx, self.state.location
+            self.state.upload_id, idx, self.state.location
         );
         self.state
             .client
