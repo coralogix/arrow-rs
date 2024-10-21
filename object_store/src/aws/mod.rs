@@ -33,7 +33,6 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::header::{HeaderName, IF_MATCH, IF_NONE_MATCH};
 use reqwest::{Method, StatusCode};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{sync::Arc, time::Duration};
 use url::Url;
 
@@ -216,7 +215,7 @@ impl ObjectStore for AmazonS3 {
         let upload_id = self.client.create_multipart(location, opts).await?;
 
         Ok(Box::new(S3MultiPartUpload {
-            part_idx: AtomicUsize::new(0),
+            part_idx: 0,
             state: Arc::new(UploadState {
                 client: Arc::clone(&self.client),
                 location: location.clone(),
@@ -320,7 +319,7 @@ impl ObjectStore for AmazonS3 {
 
 #[derive(Debug)]
 struct S3MultiPartUpload {
-    part_idx: AtomicUsize,
+    part_idx: usize,
     state: Arc<UploadState>,
 }
 
@@ -335,7 +334,8 @@ struct UploadState {
 #[async_trait]
 impl MultipartUpload for S3MultiPartUpload {
     fn put_part(&mut self, data: PutPayload) -> UploadPart {
-        let idx = self.part_idx.fetch_add(1, Ordering::AcqRel);
+        let idx = self.part_idx;
+        self.part_idx += 1;
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             let part = state
@@ -348,8 +348,7 @@ impl MultipartUpload for S3MultiPartUpload {
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
-        let part_idx = self.part_idx.load(Ordering::Acquire);
-        let parts = self.state.parts.finish(part_idx)?;
+        let parts = self.state.parts.finish(self.part_idx)?;
 
         self.state
             .client
