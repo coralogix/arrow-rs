@@ -557,9 +557,20 @@ impl S3Client {
     ) -> Result<PartId> {
         let part = (part_idx + 1).to_string();
 
-        let response = self
-            .request(Method::PUT, path)
-            .with_payload(data)
+        let mut request = self
+            .request(Method::PUT, path);
+
+        // S3 *requires* Objects in an Object Lock enabled bucket to include a Content-MD5 header:
+        // https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lock-managing.html#object-lock-put-object
+        if let Some(bytes) = data.body().as_bytes() {
+            let mut hasher = Md5::new();
+            hasher.update(bytes);
+            let b64 = BASE64_STANDARD.encode(hasher.finalize());
+            request = request.header("Content-MD5", b64.as_str())
+        }
+
+        let response =
+            request.with_payload(data)
             .query(&[("partNumber", &part), ("uploadId", upload_id)])
             .idempotent(true)
             .send()
