@@ -23,11 +23,9 @@
 //!
 //! Unused blocks will automatically be dropped after 7 days.
 use crate::{
-    multipart::{MultipartStore, PartId},
-    path::Path,
-    signer::Signer,
-    GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOpts, PutOptions, PutPayload, PutResult, Result, UploadPart,
+    multipart::MultipartStore, path::Path, signer::Signer, GetOptions, GetResult, ListResult,
+    MultipartId, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOpts, PutOptions,
+    PutPayload, PutResult, Result, UploadPart,
 };
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -50,6 +48,7 @@ mod credential;
 pub type AzureCredentialProvider = Arc<dyn CredentialProvider<Credential = AzureCredential>>;
 use crate::azure::client::AzureClient;
 use crate::client::parts::Parts;
+use crate::client::s3::MultipartPart;
 pub use builder::{AzureConfigKey, MicrosoftAzureBuilder};
 pub use credential::AzureCredential;
 
@@ -219,13 +218,14 @@ impl MultipartUpload for AzureMultiPartUpload {
         let state = Arc::clone(&self.state);
         Box::pin(async move {
             let part = state.client.put_block(&state.location, idx, data).await?;
-            state.parts.put(idx, part);
+            state.parts.put(part);
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
         let parts = self.state.parts.finish(self.part_idx)?;
+        let parts = parts.into_iter().map(|part| part.into()).collect();
 
         self.state
             .client
@@ -251,7 +251,7 @@ impl MultipartStore for MicrosoftAzure {
         _: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         self.client.put_block(path, part_idx, data).await
     }
 
@@ -259,8 +259,9 @@ impl MultipartStore for MicrosoftAzure {
         &self,
         path: &Path,
         _: &MultipartId,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
+        let parts = parts.into_iter().map(|p| p.into()).collect();
         self.client
             .put_block_list(path, parts, Default::default())
             .await

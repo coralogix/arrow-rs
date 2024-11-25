@@ -21,7 +21,7 @@ use crate::client::list::ListClient;
 use crate::client::retry::RetryExt;
 use crate::client::s3::{
     CompleteMultipartUpload, CompleteMultipartUploadResult, InitiateMultipartUploadResult,
-    ListResponse,
+    ListResponse, MultipartPart,
 };
 use crate::client::GetOptionsExt;
 use crate::gcp::{GcpCredential, GcpCredentialProvider, GcpSigningCredentialProvider, STORE};
@@ -399,7 +399,7 @@ impl GoogleCloudStorageClient {
         upload_id: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         let query = &[
             ("partNumber", &format!("{}", part_idx + 1)),
             ("uploadId", upload_id),
@@ -412,9 +412,12 @@ impl GoogleCloudStorageClient {
             .do_put()
             .await?;
 
-        Ok(PartId {
-            content_id: result.e_tag.unwrap(),
-        })
+        let part = MultipartPart {
+            e_tag: result.e_tag.unwrap(),
+            part_number: part_idx + 1,
+            checksum_sha256: None,
+        };
+        Ok(part)
     }
 
     /// Initiate a multipart upload <https://cloud.google.com/storage/docs/xml-api/post-object-multipart>

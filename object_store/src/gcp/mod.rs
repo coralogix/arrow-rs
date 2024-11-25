@@ -41,9 +41,8 @@ use crate::client::CredentialProvider;
 use crate::gcp::credential::GCSAuthorizer;
 use crate::signer::Signer;
 use crate::{
-    multipart::PartId, path::Path, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload,
-    ObjectMeta, ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result,
-    UploadPart,
+    path::Path, GetOptions, GetResult, ListResult, MultipartId, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result, UploadPart,
 };
 use async_trait::async_trait;
 use client::GoogleCloudStorageClient;
@@ -54,6 +53,7 @@ use url::Url;
 use crate::client::get::GetClientExt;
 use crate::client::list::ListClientExt;
 use crate::client::parts::Parts;
+use crate::client::s3::MultipartPart;
 use crate::multipart::MultipartStore;
 pub use builder::{GoogleCloudStorageBuilder, GoogleConfigKey};
 pub use credential::{GcpCredential, GcpSigningCredential, ServiceAccountKey};
@@ -124,13 +124,14 @@ impl MultipartUpload for GCSMultipartUpload {
                 .client
                 .put_part(&state.path, &state.multipart_id, idx, payload)
                 .await?;
-            state.parts.put(idx, part);
+            state.parts.put(part);
             Ok(())
         })
     }
 
     async fn complete(&mut self) -> Result<PutResult> {
         let parts = self.state.parts.finish(self.part_idx)?;
+        let parts = parts.into_iter().map(|p| p.into()).collect();
 
         self.state
             .client
@@ -222,7 +223,7 @@ impl MultipartStore for GoogleCloudStorage {
         id: &MultipartId,
         part_idx: usize,
         payload: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         self.client.put_part(path, id, part_idx, payload).await
     }
 
@@ -230,8 +231,9 @@ impl MultipartStore for GoogleCloudStorage {
         &self,
         path: &Path,
         id: &MultipartId,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
+        let parts = parts.into_iter().map(|p| p.into()).collect();
         self.client.multipart_complete(path, id, parts).await
     }
 

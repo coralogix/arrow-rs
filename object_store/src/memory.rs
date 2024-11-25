@@ -27,7 +27,8 @@ use futures::{stream::BoxStream, StreamExt};
 use parking_lot::RwLock;
 use snafu::{OptionExt, ResultExt, Snafu};
 
-use crate::multipart::{MultipartStore, PartId};
+use crate::client::s3::MultipartPart;
+use crate::multipart::MultipartStore;
 use crate::util::InvalidGetRange;
 use crate::{
     path::Path, Attributes, GetRange, GetResult, GetResultPayload, ListResult, MultipartId,
@@ -413,23 +414,26 @@ impl MultipartStore for InMemory {
         id: &MultipartId,
         part_idx: usize,
         payload: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         let mut storage = self.storage.write();
         let upload = storage.upload_mut(id)?;
         if part_idx <= upload.parts.len() {
             upload.parts.resize(part_idx + 1, None);
         }
         upload.parts[part_idx] = Some(payload.into());
-        Ok(PartId {
-            content_id: Default::default(),
-        })
+        let part = MultipartPart {
+            e_tag: "".to_string(),
+            part_number: 0,
+            checksum_sha256: None,
+        };
+        Ok(part)
     }
 
     async fn complete_multipart(
         &self,
         path: &Path,
         id: &MultipartId,
-        _parts: Vec<PartId>,
+        _parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
         let mut storage = self.storage.write();
         let upload = storage.remove_upload(id)?;

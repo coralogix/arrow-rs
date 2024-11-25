@@ -20,7 +20,8 @@ use parking_lot::Mutex;
 use std::ops::Range;
 use std::{convert::TryInto, sync::Arc};
 
-use crate::multipart::{MultipartStore, PartId};
+use crate::client::s3::MultipartPart;
+use crate::multipart::MultipartStore;
 use crate::{
     path::Path, GetResult, GetResultPayload, ListResult, MultipartId, MultipartUpload, ObjectMeta,
     ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result,
@@ -350,7 +351,7 @@ impl<T: MultipartStore> MultipartStore for ThrottledStore<T> {
         id: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         sleep(self.config().wait_put_per_call).await;
         self.inner.put_part(path, id, part_idx, data).await
     }
@@ -359,7 +360,7 @@ impl<T: MultipartStore> MultipartStore for ThrottledStore<T> {
         &self,
         path: &Path,
         id: &MultipartId,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
         self.inner.complete_multipart(path, id, parts).await
     }

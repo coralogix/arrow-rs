@@ -23,6 +23,7 @@
 
 use async_trait::async_trait;
 
+use crate::client::s3::MultipartPart;
 use crate::path::Path;
 use crate::{MultipartId, PutPayload, PutResult, Result};
 
@@ -31,6 +32,14 @@ use crate::{MultipartId, PutPayload, PutResult, Result};
 pub struct PartId {
     /// Id of this part
     pub content_id: String,
+}
+
+impl From<MultipartPart> for PartId {
+    fn from(value: MultipartPart) -> Self {
+        PartId {
+            content_id: value.e_tag.clone(),
+        }
+    }
 }
 
 /// A low-level interface for interacting with multipart upload APIs
@@ -64,7 +73,7 @@ pub trait MultipartStore: Send + Sync + 'static {
         id: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId>;
+    ) -> Result<MultipartPart>;
 
     /// Completes a multipart upload
     ///
@@ -76,7 +85,7 @@ pub trait MultipartStore: Send + Sync + 'static {
         &self,
         path: &Path,
         id: &MultipartId,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult>;
 
     /// Aborts a multipart upload

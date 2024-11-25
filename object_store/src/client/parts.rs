@@ -15,26 +15,26 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use crate::multipart::PartId;
+use crate::client::s3::MultipartPart;
 use parking_lot::Mutex;
 
 /// An interior mutable collection of upload parts and their corresponding part index
 #[derive(Debug, Default)]
-pub(crate) struct Parts(Mutex<Vec<(usize, PartId)>>);
+pub(crate) struct Parts(Mutex<Vec<MultipartPart>>);
 
 impl Parts {
     /// Record the [`PartId`] for a given index
     ///
     /// Note: calling this method multiple times with the same `part_idx`
     /// will result in multiple [`PartId`] in the final output
-    pub(crate) fn put(&self, part_idx: usize, id: PartId) {
-        self.0.lock().push((part_idx, id))
+    pub(crate) fn put(&self, part: MultipartPart) {
+        self.0.lock().push(part)
     }
 
     /// Produce the final list of [`PartId`] ordered by `part_idx`
     ///
     /// `expected` is the number of parts expected in the final result
-    pub(crate) fn finish(&self, expected: usize) -> crate::Result<Vec<PartId>> {
+    pub(crate) fn finish(&self, expected: usize) -> crate::Result<Vec<MultipartPart>> {
         let mut parts = self.0.lock();
         if parts.len() != expected {
             return Err(crate::Error::Generic {
@@ -42,7 +42,7 @@ impl Parts {
                 source: "Missing part".to_string().into(),
             });
         }
-        parts.sort_unstable_by_key(|(idx, _)| *idx);
-        Ok(parts.drain(..).map(|(_, v)| v).collect())
+        parts.sort_unstable_by_key(|part| part.part_number);
+        Ok(parts.drain(..).collect())
     }
 }

@@ -22,6 +22,7 @@ use crate::client::get::GetClient;
 use crate::client::header::{get_put_result, HeaderConfig};
 use crate::client::list::ListClient;
 use crate::client::retry::RetryExt;
+use crate::client::s3::MultipartPart;
 use crate::client::GetOptionsExt;
 use crate::multipart::PartId;
 use crate::path::DELIMITER;
@@ -304,7 +305,7 @@ impl AzureClient {
         path: &Path,
         part_idx: usize,
         payload: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         let content_id = format!("{part_idx:20}");
         let block_id = BASE64_STANDARD.encode(&content_id);
 
@@ -314,7 +315,12 @@ impl AzureClient {
             .send()
             .await?;
 
-        Ok(PartId { content_id })
+        let part = MultipartPart {
+            e_tag: content_id,
+            part_number: part_idx + 1,
+            checksum_sha256: None,
+        };
+        Ok(part)
     }
 
     /// PUT a block list <https://learn.microsoft.com/en-us/rest/api/storageservices/put-block-list>

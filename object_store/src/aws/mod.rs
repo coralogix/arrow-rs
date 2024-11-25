@@ -40,7 +40,7 @@ use crate::aws::client::{RequestError, S3Client};
 use crate::client::get::GetClientExt;
 use crate::client::list::ListClientExt;
 use crate::client::CredentialProvider;
-use crate::multipart::{MultipartStore, PartId};
+use crate::multipart::MultipartStore;
 use crate::signer::Signer;
 use crate::util::STRICT_ENCODE_SET;
 use crate::{
@@ -74,6 +74,7 @@ const STORE: &str = "S3";
 /// [`CredentialProvider`] for [`AmazonS3`]
 pub type AwsCredentialProvider = Arc<dyn CredentialProvider<Credential = AwsCredential>>;
 use crate::client::parts::Parts;
+use crate::client::s3::MultipartPart;
 pub use credential::{AwsAuthorizer, AwsCredential};
 
 /// Interface for [Amazon S3](https://aws.amazon.com/s3/).
@@ -293,6 +294,47 @@ impl ObjectStore for AmazonS3 {
         let (k, v, status) = match &self.client.config.copy_if_not_exists {
             Some(S3CopyIfNotExists::Header(k, v)) => (k, v, StatusCode::PRECONDITION_FAILED),
             Some(S3CopyIfNotExists::HeaderWithStatus(k, v, status)) => (k, v, *status),
+            Some(S3CopyIfNotExists::Multipart) => {
+                let upload_id = self
+                    .client
+                    .create_multipart(to, PutMultipartOpts::default())
+                    .await?;
+
+                let res = async {
+                    let part = self
+                        .client
+                        .put_part(to, &upload_id, 0, PutPartPayload::Copy(from))
+                        .await?;
+                    match self
+                        .client
+                        .complete_multipart(
+                            to,
+                            &upload_id,
+                            vec![part],
+                            CompleteMultipartMode::Create,
+                        )
+                        .await
+                    {
+                        Err(e @ Error::Precondition { .. }) => Err(Error::AlreadyExists {
+                            path: to.to_string(),
+                            source: Box::new(e),
+                        }),
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(e),
+                    }
+                }
+                .await;
+
+                // If the multipart upload failed, make a best effort attempt to
+                // clean it up. It's the caller's responsibility to add a
+                // lifecycle rule if guaranteed cleanup is required, as we
+                // cannot protect against an ill-timed process crash.
+                if res.is_err() {
+                    let _ = self.client.abort_multipart(to, &upload_id).await;
+                }
+
+                return res;
+            }
             Some(S3CopyIfNotExists::Dynamo(lock)) => {
                 return lock.copy_if_not_exists(&self.client, from, to).await
             }
@@ -342,7 +384,7 @@ impl MultipartUpload for S3MultiPartUpload {
                 .client
                 .put_part(&state.location, &state.upload_id, idx, data)
                 .await?;
-            state.parts.put(idx, part);
+            state.parts.put(part);
             Ok(())
         })
     }
@@ -383,7 +425,7 @@ impl MultipartStore for AmazonS3 {
         id: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         self.client.put_part(path, id, part_idx, data).await
     }
 
@@ -391,7 +433,7 @@ impl MultipartStore for AmazonS3 {
         &self,
         path: &Path,
         id: &MultipartId,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
         self.client.complete_multipart(path, id, parts).await
     }
@@ -415,6 +457,66 @@ mod tests {
     use hyper::HeaderMap;
 
     const NON_EXISTENT_NAME: &str = "nonexistentname";
+
+    #[tokio::test]
+    async fn write_multipart_file_with_signature() {
+        maybe_skip_integration!();
+
+        let bucket = "bg-no-object-lock-test";
+        let store = AmazonS3Builder::from_env()
+            .with_region("eu-west-1")
+            .with_bucket_name(bucket)
+            .with_checksum_algorithm(Checksum::SHA256)
+            .build()
+            .unwrap();
+
+        let str = "test.bin";
+        let path = Path::parse(str).unwrap();
+        let opts = PutMultipartOpts::default();
+        let mut upload = store.put_multipart_opts(&path, opts).await.unwrap();
+
+        let payload = PutPayload::from_static(&[0u8; 10485760]);
+        let part = upload.put_part(payload).await;
+        if part.is_err() {
+            part.unwrap()
+        }
+
+        let part = upload.put_part(PutPayload::from_static(&[0u8; 5514256]));
+        part.await.unwrap();
+
+        let res = upload.complete().await.unwrap();
+        println!("res={res:?}");
+    }
+
+    #[tokio::test]
+    async fn write_multipart_file_with_signature_object_lock() {
+        maybe_skip_integration!();
+
+        let bucket = "bg-object-lock-test";
+        let store = AmazonS3Builder::from_env()
+            .with_region("eu-north-1")
+            .with_bucket_name(bucket)
+            .with_checksum_algorithm(Checksum::SHA256)
+            .build()
+            .unwrap();
+
+        let str = "test.bin";
+        let path = Path::parse(str).unwrap();
+        let opts = PutMultipartOpts::default();
+        let mut upload = store.put_multipart_opts(&path, opts).await.unwrap();
+
+        let payload = PutPayload::from_static(&[0u8; 10485760]);
+        let part = upload.put_part(payload).await;
+        if part.is_err() {
+            part.unwrap()
+        }
+
+        let part = upload.put_part(PutPayload::from_static(&[0u8; 5514256]));
+        part.await.unwrap();
+
+        let res = upload.complete().await.unwrap();
+        println!("res={res:?}");
+    }
 
     #[tokio::test]
     async fn s3_test() {

@@ -106,6 +106,22 @@ impl From<Vec<PartId>> for CompleteMultipartUpload {
             .map(|(part_number, part)| MultipartPart {
                 e_tag: part.content_id,
                 part_number: part_number + 1,
+                checksum_sha256: None,
+            })
+            .collect();
+        Self { part }
+    }
+}
+
+impl From<Vec<MultipartPart>> for CompleteMultipartUpload {
+    fn from(value: Vec<MultipartPart>) -> Self {
+        let part = value
+            .into_iter()
+            .enumerate()
+            .map(|(_, part)| MultipartPart {
+                e_tag: part.e_tag,
+                part_number: part.part_number,
+                checksum_sha256: part.checksum_sha256,
             })
             .collect();
         Self { part }
@@ -118,6 +134,8 @@ pub struct MultipartPart {
     pub e_tag: String,
     #[serde(rename = "PartNumber")]
     pub part_number: usize,
+    #[serde(rename = "ChecksumSHA256")]
+    pub checksum_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

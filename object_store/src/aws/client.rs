@@ -29,10 +29,9 @@ use crate::client::list::ListClient;
 use crate::client::retry::RetryExt;
 use crate::client::s3::{
     CompleteMultipartUpload, CompleteMultipartUploadResult, InitiateMultipartUploadResult,
-    ListResponse,
+    ListResponse, MultipartPart,
 };
 use crate::client::GetOptionsExt;
-use crate::multipart::PartId;
 use crate::path::DELIMITER;
 use crate::{
     Attribute, Attributes, ClientOptions, GetOptions, ListResult, MultipartId, Path,
@@ -164,7 +163,7 @@ impl From<DeleteError> for Error {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S3Config {
     pub region: String,
     pub endpoint: Option<String>,
@@ -412,6 +411,25 @@ impl S3Client {
         }
     }
 
+    pub(crate) fn request_with_config<'a>(
+        &'a self,
+        method: Method,
+        path: &'a Path,
+        config: &'a S3Config,
+    ) -> Request<'a> {
+        let url = self.config.path_url(path);
+        Request {
+            path,
+            builder: self.client.request(method, url),
+            payload: None,
+            payload_sha256: None,
+            config,
+            use_session_creds: true,
+            idempotent: false,
+            retry_error_body: false,
+        }
+    }
+
     /// Make an S3 Delete Objects request <https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html>
     ///
     /// Produces a vector of results, one for each path in the input vector. If
@@ -531,6 +549,7 @@ impl S3Client {
     ) -> Result<MultipartId> {
         let response = self
             .request(Method::POST, location)
+            .header("x-amz-checksum-algorithm", "SHA256")
             .query(&[("uploads", "")])
             .with_encryption_headers()
             .with_attributes(opts.attributes)
@@ -554,14 +573,66 @@ impl S3Client {
         upload_id: &MultipartId,
         part_idx: usize,
         data: PutPayload,
-    ) -> Result<PartId> {
+    ) -> Result<MultipartPart> {
         let part = (part_idx + 1).to_string();
+        let config = S3Config {
+            checksum: Some(Checksum::SHA256),
+            ..self.config.clone()
+        };
 
         let response = self
-            .request(Method::PUT, path)
+            .request_with_config(Method::PUT, path, &config)
             .with_payload(data)
             .query(&[("partNumber", &part), ("uploadId", upload_id)])
-            .idempotent(true)
+            .idempotent(true);
+
+        request = match data {
+            PutPartPayload::Part(payload) => request.with_payload(payload),
+            PutPartPayload::Copy(path) => request.header(
+                "x-amz-copy-source",
+                &format!("{}/{}", self.config.bucket, encode_path(path)),
+            ),
+        };
+
+        if self
+            .config
+            .encryption_headers
+            .0
+            .contains_key("x-amz-server-side-encryption-customer-algorithm")
+        {
+            // If SSE-C is used, we must include the encryption headers in every upload request.
+            request = request.with_encryption_headers();
+        }
+        let response = request.send().await?;
+        let checksum_sha256 = response
+            .headers()
+            .get("x-amz-checksum-sha256")
+            .map(|v| v.to_str().unwrap().to_string());
+
+        let content_id = match is_copy {
+            false => get_etag(response.headers()).context(MetadataSnafu)?,
+            true => {
+                let response = response
+                    .bytes()
+                    .await
+                    .context(CreateMultipartResponseBodySnafu)?;
+                let response: CopyPartResult = quick_xml::de::from_reader(response.reader())
+                    .context(InvalidMultipartResponseSnafu)?;
+                response.e_tag
+            }
+        };
+        let part = MultipartPart {
+            e_tag: content_id,
+            part_number: part_idx + 1,
+            checksum_sha256,
+        };
+        Ok(part)
+    }
+
+    pub(crate) async fn abort_multipart(&self, location: &Path, upload_id: &str) -> Result<()> {
+        self.request(Method::DELETE, location)
+            .query(&[("uploadId", upload_id)])
+            .with_encryption_headers()
             .send()
             .await?;
 
@@ -573,7 +644,7 @@ impl S3Client {
         &self,
         location: &Path,
         upload_id: &str,
-        parts: Vec<PartId>,
+        parts: Vec<MultipartPart>,
     ) -> Result<PutResult> {
         let parts = if parts.is_empty() {
             // If no parts were uploaded, upload an empty part
