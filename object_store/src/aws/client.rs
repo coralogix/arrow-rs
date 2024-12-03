@@ -29,7 +29,7 @@ use crate::client::list::ListClient;
 use crate::client::retry::RetryExt;
 use crate::client::s3::{
     CompleteMultipartUpload, CompleteMultipartUploadResult, InitiateMultipartUploadResult,
-    ListResponse,
+    ListResponse, PartMetadata,
 };
 use crate::client::GetOptionsExt;
 use crate::multipart::PartId;
@@ -62,6 +62,7 @@ use std::sync::Arc;
 const VERSION_HEADER: &str = "x-amz-version-id";
 const SHA256_CHECKSUM: &str = "x-amz-checksum-sha256";
 const USER_DEFINED_METADATA_HEADER_PREFIX: &str = "x-amz-meta-";
+const ALGORITHM: &str = "x-amz-checksum-algorithm";
 
 /// A specialized `Error` for object store-related errors
 #[derive(Debug, Snafu)]
@@ -349,10 +350,9 @@ impl<'a> Request<'a> {
             let payload_sha256 = sha256.finish();
 
             if let Some(Checksum::SHA256) = self.config.checksum {
-                self.builder = self.builder.header(
-                    "x-amz-checksum-sha256",
-                    BASE64_STANDARD.encode(payload_sha256),
-                );
+                self.builder = self
+                    .builder
+                    .header(SHA256_CHECKSUM, BASE64_STANDARD.encode(payload_sha256));
             }
             self.payload_sha256 = Some(payload_sha256);
         }
@@ -534,8 +534,11 @@ impl S3Client {
         location: &Path,
         opts: PutMultipartOpts,
     ) -> Result<MultipartId> {
-        let response = self
-            .request(Method::POST, location)
+        let mut reqquest = self.request(Method::POST, location);
+        if let Some(algorithm) = self.config.checksum {
+            reqquest = reqquest.header(ALGORITHM, &algorithm.to_string().to_uppercase());
+        }
+        let response = reqquest
             .query(&[("uploads", "")])
             .with_encryption_headers()
             .with_attributes(opts.attributes)
@@ -569,8 +572,21 @@ impl S3Client {
             .idempotent(true)
             .send()
             .await?;
+        let checksum = response
+            .headers()
+            .get(SHA256_CHECKSUM)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.to_string());
 
-        let content_id = get_etag(response.headers()).context(MetadataSnafu)?;
+        let e_tag = get_etag(response.headers()).context(MetadataSnafu)?;
+
+        let content_id = if self.config.checksum == Some(Checksum::SHA256) {
+            let meta = PartMetadata { e_tag, checksum };
+            quick_xml::se::to_string(&meta).unwrap()
+        } else {
+            e_tag
+        };
+
         Ok(PartId { content_id })
     }
 
