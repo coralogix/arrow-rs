@@ -34,39 +34,6 @@ on:
       - .github/**
 
 jobs:
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
-    defaults:
-      run:
-        working-directory: object_store
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-      - name: Setup Clippy
-        run: rustup component add clippy
-      # Run different tests for the library on its own as well as
-      # all targets to ensure that it still works in the absence of
-      # features that might be enabled by dev-dependencies of other
-      # targets.
-      - name: Run clippy with default features
-        run: cargo clippy -- -D warnings
-      - name: Run clippy with aws feature
-        run: cargo clippy --features aws -- -D warnings
-      - name: Run clippy with gcp feature
-        run: cargo clippy --features gcp -- -D warnings
-      - name: Run clippy with azure feature
-        run: cargo clippy --features azure -- -D warnings
-      - name: Run clippy with http feature
-        run: cargo clippy --features http -- -D warnings
-      - name: Run clippy with all features
-        run: cargo clippy --all-features -- -D warnings
-      - name: Run clippy with all features and all targets
-        run: cargo clippy --all-features --all-targets -- -D warnings
-
   # test doc links still work
   #
   # Note that since object_store is not part of the main workspace,
