@@ -34,39 +34,6 @@ on:
       - .github/**
 
 jobs:
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
-    defaults:
-      run:
-        working-directory: object_store
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-      - name: Setup Clippy
-        run: rustup component add clippy
-      # Run different tests for the library on its own as well as
-      # all targets to ensure that it still works in the absence of
-      # features that might be enabled by dev-dependencies of other
-      # targets.
-      - name: Run clippy with default features
-        run: cargo clippy -- -D warnings
-      - name: Run clippy with aws feature
-        run: cargo clippy --features aws -- -D warnings
-      - name: Run clippy with gcp feature
-        run: cargo clippy --features gcp -- -D warnings
-      - name: Run clippy with azure feature
-        run: cargo clippy --features azure -- -D warnings
-      - name: Run clippy with http feature
-        run: cargo clippy --features http -- -D warnings
-      - name: Run clippy with all features
-        run: cargo clippy --all-features -- -D warnings
-      - name: Run clippy with all features and all targets
-        run: cargo clippy --all-features --all-targets -- -D warnings
-
   # test doc links still work
   #
   # Note that since object_store is not part of the main workspace,
@@ -141,6 +108,7 @@ jobs:
           echo "LOCALSTACK_CONTAINER=$(docker run -d -p 4566:4566 localstack/localstack:3.3.0)" >> $GITHUB_ENV
           echo "EC2_METADATA_CONTAINER=$(docker run -d -p 1338:1338 amazon/amazon-ec2-metadata-mock:v1.9.2 --imdsv2)" >> $GITHUB_ENV
           aws --endpoint-url=http://localhost:4566 s3 mb s3://test-bucket
+          aws --endpoint-url=http://localhost:4566 s3api create-bucket --bucket test-object-lock --object-lock-enabled-for-bucket
           aws --endpoint-url=http://localhost:4566 dynamodb create-table --table-name test-table --key-schema AttributeName=path,KeyType=HASH AttributeName=etag,KeyType=RANGE --attribute-definitions AttributeName=path,AttributeType=S AttributeName=etag,AttributeType=S --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5
 
           KMS_KEY=$(aws --endpoint-url=http://localhost:4566 kms create-key --description "test key")

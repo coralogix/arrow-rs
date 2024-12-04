@@ -220,12 +220,12 @@ impl WriteMultipart {
 
     /// Flush final chunk, and await completion of all in-flight requests
     pub async fn finish(mut self) -> Result<PutResult> {
+        self.wait_for_capacity(0).await?;
+
         if !self.buffer.is_empty() {
             let part = std::mem::take(&mut self.buffer);
-            self.put_part(part.into())
+            self.upload.put_part(part.into()).await?;
         }
-
-        self.wait_for_capacity(0).await?;
 
         match self.upload.complete().await {
             Err(e) => {
