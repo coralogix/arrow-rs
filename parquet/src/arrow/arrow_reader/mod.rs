@@ -1015,6 +1015,65 @@ pub(crate) fn evaluate_predicate(
     })
 }
 
+/// Maximum number of bytes that can be evaluated in a row filter
+/// before yielding back to the scheduler
+const DECODE_BUDGET: usize = 2 * 1024 * 1024;
+
+/// Evaluates an [`ArrowPredicate`], returning a [`RowSelection`] indicating
+/// which rows to return.
+///
+/// `input_selection`: Optional pre-existing selection. If `Some`, then the
+/// final [`RowSelection`] will be the conjunction of it and the rows selected
+/// by `predicate`.
+///
+/// Note: A pre-existing selection may come from evaluating a previous predicate
+/// or if the [`ParquetRecordBatchReader`] specified an explicit
+/// [`RowSelection`] in addition to one or more predicates.
+#[allow(dead_code)]
+pub(crate) async fn evaluate_predicate_coop(
+    batch_size: usize,
+    array_reader: Box<dyn ArrayReader>,
+    input_selection: Option<RowSelection>,
+    predicate: &mut dyn ArrowPredicate,
+) -> Result<RowSelection> {
+    let mut budget = DECODE_BUDGET;
+
+    let reader = ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
+    let mut filters = vec![];
+    for maybe_batch in reader {
+        let maybe_batch = maybe_batch?;
+        budget = budget.saturating_sub(maybe_batch.get_array_memory_size());
+
+        let input_rows = maybe_batch.num_rows();
+        let filter = predicate.evaluate(maybe_batch)?;
+        // Since user supplied predicate, check error here to catch bugs quickly
+        if filter.len() != input_rows {
+            return Err(arrow_err!(
+                "ArrowPredicate predicate returned {} rows, expected {input_rows}",
+                filter.len()
+            ));
+        }
+        match filter.null_count() {
+            0 => filters.push(filter),
+            _ => filters.push(prep_null_mask_filter(&filter)),
+        };
+
+        if budget == 0 {
+            // If we have consumed our decode budget, reset the budget and yield
+            // back to the scheduler
+            budget = DECODE_BUDGET;
+            #[cfg(feature = "async")]
+            tokio::task::yield_now().await;
+        }
+    }
+
+    let raw = RowSelection::from_filters(&filters);
+    Ok(match input_selection {
+        Some(selection) => selection.and_then(&raw),
+        None => raw,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::cmp::min;
