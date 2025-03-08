@@ -42,7 +42,7 @@ use arrow_schema::{DataType, Fields, Schema, SchemaRef};
 
 use crate::arrow::array_reader::{build_array_reader, RowGroups};
 use crate::arrow::arrow_reader::{
-    apply_range, evaluate_predicate, selects_any, ArrowReaderBuilder, ArrowReaderMetadata,
+    apply_range, evaluate_predicate_coop, selects_any, ArrowReaderBuilder, ArrowReaderMetadata,
     ArrowReaderOptions, ParquetRecordBatchReader, RowFilter, RowSelection,
 };
 use crate::arrow::ProjectionMask;
@@ -584,12 +584,15 @@ where
                 let array_reader =
                     build_array_reader(self.fields.as_deref(), predicate_projection, &row_group)?;
 
-                selection = Some(evaluate_predicate(
-                    batch_size,
-                    array_reader,
-                    selection,
-                    predicate.as_mut(),
-                )?);
+                selection = Some(
+                    evaluate_predicate_coop(
+                        batch_size,
+                        array_reader,
+                        selection,
+                        predicate.as_mut(),
+                    )
+                    .await?,
+                );
             }
         }
 
