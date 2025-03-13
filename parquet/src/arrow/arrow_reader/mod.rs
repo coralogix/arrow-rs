@@ -17,19 +17,21 @@
 
 //! Contains reader which reads parquet data into arrow [`RecordBatch`]
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-
 use arrow_array::cast::AsArray;
 use arrow_array::Array;
 use arrow_array::{RecordBatch, RecordBatchReader};
 use arrow_schema::{ArrowError, DataType as ArrowType, Schema, SchemaRef};
 use arrow_select::filter::prep_null_mask_filter;
 pub use filter::{ArrowPredicate, ArrowPredicateFn, RowFilter};
+use futures::ready;
 pub use selection::{RowSelection, RowSelector};
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::task::Poll;
 
 pub use crate::arrow::array_reader::RowGroups;
 use crate::arrow::array_reader::{build_array_reader, ArrayReader};
+use crate::arrow::async_reader::CoopPermit;
 use crate::arrow::schema::{parquet_to_arrow_schema_and_fields, ParquetField};
 use crate::arrow::{parquet_to_arrow_field_levels, FieldLevels, ProjectionMask};
 use crate::column::page::{PageIterator, PageReader};
@@ -939,38 +941,75 @@ pub(crate) fn evaluate_predicate(
 /// Note: A pre-existing selection may come from evaluating a previous predicate
 /// or if the [`ParquetRecordBatchReader`] specified an explicit
 /// [`RowSelection`] in addition to one or more predicates.
-pub(crate) async fn evaluate_predicate_coop(
+pub(crate) async fn evaluate_predicate_coop<P: CoopPermit>(
     batch_size: usize,
     array_reader: Box<dyn ArrayReader>,
-    input_selection: Option<RowSelection>,
+    mut input_selection: Option<RowSelection>,
     predicate: &mut dyn ArrowPredicate,
+    coop_permit: &mut P,
 ) -> Result<RowSelection> {
-    let reader = ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
+    let mut reader =
+        ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
     let mut filters = vec![];
-    for maybe_batch in reader {
-        let maybe_batch = maybe_batch?;
-        let input_rows = maybe_batch.num_rows();
-        let filter = predicate.evaluate(maybe_batch)?;
-        // Since user supplied predicate, check error here to catch bugs quickly
-        if filter.len() != input_rows {
-            return Err(arrow_err!(
-                "ArrowPredicate predicate returned {} rows, expected {input_rows}",
-                filter.len()
-            ));
+
+    std::future::poll_fn(move |cx| {
+        while let Some(maybe_batch) = reader.next() {
+            let maybe_batch = maybe_batch?;
+
+            coop_permit.progress(&maybe_batch);
+
+            let input_rows = maybe_batch.num_rows();
+            let filter = predicate.evaluate(maybe_batch)?;
+            // Since user supplied predicate, check error here to catch bugs quickly
+            if filter.len() != input_rows {
+                return Poll::Ready(Err(arrow_err!(
+                    "ArrowPredicate predicate returned {} rows, expected {input_rows}",
+                    filter.len()
+                )));
+            }
+            match filter.null_count() {
+                0 => filters.push(filter),
+                _ => filters.push(prep_null_mask_filter(&filter)),
+            };
+
+            ready!(coop_permit.poll_proceed(cx));
         }
-        match filter.null_count() {
-            0 => filters.push(filter),
-            _ => filters.push(prep_null_mask_filter(&filter)),
-        };
 
-        tokio::task::consume_budget().await;
-    }
-
-    let raw = RowSelection::from_filters(&filters);
-    Ok(match input_selection {
-        Some(selection) => selection.and_then(&raw),
-        None => raw,
+        let raw = RowSelection::from_filters(&filters);
+        Poll::Ready(Ok(match input_selection.take() {
+            Some(selection) => selection.and_then(&raw),
+            None => raw,
+        }))
     })
+    .await
+
+    // for maybe_batch in reader {
+    //     let maybe_batch = maybe_batch?;
+    //
+    //     coop_permit.progress(&maybe_batch);
+    //
+    //     let input_rows = maybe_batch.num_rows();
+    //     let filter = predicate.evaluate(maybe_batch)?;
+    //     // Since user supplied predicate, check error here to catch bugs quickly
+    //     if filter.len() != input_rows {
+    //         return Err(arrow_err!(
+    //             "ArrowPredicate predicate returned {} rows, expected {input_rows}",
+    //             filter.len()
+    //         ));
+    //     }
+    //     match filter.null_count() {
+    //         0 => filters.push(filter),
+    //         _ => filters.push(prep_null_mask_filter(&filter)),
+    //     };
+    //
+    //     match coop_permit.p
+    // }
+
+    // let raw = RowSelection::from_filters(&filters);
+    // Ok(match input_selection {
+    //     Some(selection) => selection.and_then(&raw),
+    //     None => raw,
+    // })
 }
 
 #[cfg(test)]

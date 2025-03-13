@@ -77,6 +77,7 @@
 
 use std::collections::VecDeque;
 use std::fmt::Formatter;
+use std::future::Future;
 use std::io::SeekFrom;
 use std::ops::Range;
 use std::pin::Pin;
@@ -428,6 +429,65 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             fields: self.fields,
             limit: self.limit,
             offset: self.offset,
+            coop_budget: Unbounded,
+        };
+
+        // Ensure schema of ParquetRecordBatchStream respects projection, and does
+        // not store metadata (same as for ParquetRecordBatchReader and emitted RecordBatches)
+        let projected_fields = match reader.fields.as_deref().map(|pf| &pf.arrow_type) {
+            Some(DataType::Struct(fields)) => {
+                fields.filter_leaves(|idx, _| self.projection.leaf_included(idx))
+            }
+            None => Fields::empty(),
+            _ => unreachable!("Must be Struct for root type"),
+        };
+        let schema = Arc::new(Schema::new(projected_fields));
+
+        Ok(ParquetRecordBatchStream {
+            metadata: self.metadata,
+            batch_size,
+            row_groups,
+            projection: self.projection,
+            selection: self.selection,
+            schema,
+            reader: Some(reader),
+            state: StreamState::Init,
+        })
+    }
+
+    /// Build a new [`ParquetRecordBatchStream`] with a coop budget
+    pub fn build_with_budget<C: CoopBudget>(
+        self,
+        coop_budget: C,
+    ) -> Result<ParquetRecordBatchStream<T, C>> {
+        let num_row_groups = self.metadata.row_groups().len();
+
+        let row_groups = match self.row_groups {
+            Some(row_groups) => {
+                if let Some(col) = row_groups.iter().find(|x| **x >= num_row_groups) {
+                    return Err(general_err!(
+                        "row group {} out of bounds 0..{}",
+                        col,
+                        num_row_groups
+                    ));
+                }
+                row_groups.into()
+            }
+            None => (0..self.metadata.row_groups().len()).collect(),
+        };
+
+        // Try to avoid allocate large buffer
+        let batch_size = self
+            .batch_size
+            .min(self.metadata.file_metadata().num_rows() as usize);
+        let reader = ReaderFactory {
+            input: self.input.0,
+            filter: self.filter,
+            metadata: self.metadata.clone(),
+            fields: self.fields,
+            limit: self.limit,
+            offset: self.offset,
+            coop_budget,
         };
 
         // Ensure schema of ParquetRecordBatchStream respects projection, and does
@@ -454,11 +514,14 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
     }
 }
 
-type ReadResult<T> = Result<(ReaderFactory<T>, Option<ParquetRecordBatchReader>)>;
+type ReadResult<T, C> = Result<(
+    ReaderFactory<T, C>,
+    Option<(ParquetRecordBatchReader, <C as CoopBudget>::Permit)>,
+)>;
 
 /// [`ReaderFactory`] is used by [`ParquetRecordBatchStream`] to create
 /// [`ParquetRecordBatchReader`]
-struct ReaderFactory<T> {
+struct ReaderFactory<T, C> {
     metadata: Arc<ParquetMetaData>,
 
     fields: Option<Arc<ParquetField>>,
@@ -470,11 +533,14 @@ struct ReaderFactory<T> {
     limit: Option<usize>,
 
     offset: Option<usize>,
+
+    coop_budget: C,
 }
 
-impl<T> ReaderFactory<T>
+impl<T, C> ReaderFactory<T, C>
 where
     T: AsyncFileReader + Send,
+    C: CoopBudget,
 {
     /// Reads the next row group with the provided `selection`, `projection` and `batch_size`
     ///
@@ -485,7 +551,7 @@ where
         mut selection: Option<RowSelection>,
         projection: ProjectionMask,
         batch_size: usize,
-    ) -> ReadResult<T> {
+    ) -> ReadResult<T, C> {
         // TODO: calling build_array multiple times is wasteful
 
         let meta = self.metadata.row_group(row_group_idx);
@@ -516,12 +582,14 @@ where
                 let array_reader =
                     build_array_reader(self.fields.as_deref(), predicate_projection, &row_group)?;
 
+                let mut permit = self.coop_budget.acquire_permit().await;
                 selection = Some(
                     evaluate_predicate_coop(
                         batch_size,
                         array_reader,
                         selection,
                         predicate.as_mut(),
+                        &mut permit,
                     )
                     .await?,
                 );
@@ -571,26 +639,28 @@ where
             selection,
         );
 
-        Ok((self, Some(reader)))
+        let permit = self.coop_budget.acquire_permit().await;
+
+        Ok((self, Some((reader, permit))))
     }
 }
 
-enum StreamState<T> {
+enum StreamState<T, C: CoopBudget> {
     /// At the start of a new row group, or the end of the parquet stream
     Init,
     /// Decoding a batch
-    Decoding(ParquetRecordBatchReader),
+    Decoding(ParquetRecordBatchReader, C::Permit),
     /// Reading data from input
-    Reading(BoxFuture<'static, ReadResult<T>>),
+    Reading(BoxFuture<'static, ReadResult<T, C>>),
     /// Error
     Error,
 }
 
-impl<T> std::fmt::Debug for StreamState<T> {
+impl<T, C: CoopBudget> std::fmt::Debug for StreamState<T, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             StreamState::Init => write!(f, "StreamState::Init"),
-            StreamState::Decoding(_) => write!(f, "StreamState::Decoding"),
+            StreamState::Decoding(_, _) => write!(f, "StreamState::Decoding"),
             StreamState::Reading(_) => write!(f, "StreamState::Reading"),
             StreamState::Error => write!(f, "StreamState::Error"),
         }
@@ -599,7 +669,7 @@ impl<T> std::fmt::Debug for StreamState<T> {
 
 /// An asynchronous [`Stream`](https://docs.rs/futures/latest/futures/stream/trait.Stream.html) of [`RecordBatch`]
 /// for a parquet file that can be constructed using [`ParquetRecordBatchStreamBuilder`].
-pub struct ParquetRecordBatchStream<T> {
+pub struct ParquetRecordBatchStream<T, C: CoopBudget = Unbounded> {
     metadata: Arc<ParquetMetaData>,
 
     schema: SchemaRef,
@@ -613,12 +683,12 @@ pub struct ParquetRecordBatchStream<T> {
     selection: Option<RowSelection>,
 
     /// This is an option so it can be moved into a future
-    reader: Option<ReaderFactory<T>>,
+    reader: Option<ReaderFactory<T, C>>,
 
-    state: StreamState<T>,
+    state: StreamState<T, C>,
 }
 
-impl<T> std::fmt::Debug for ParquetRecordBatchStream<T> {
+impl<T, C: CoopBudget> std::fmt::Debug for ParquetRecordBatchStream<T, C> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParquetRecordBatchStream")
             .field("metadata", &self.metadata)
@@ -627,6 +697,35 @@ impl<T> std::fmt::Debug for ParquetRecordBatchStream<T> {
             .field("projection", &self.projection)
             .field("state", &self.state)
             .finish()
+    }
+}
+
+pub trait CoopPermit: Send + Unpin + 'static {
+
+    #[inline]
+    fn poll_proceed(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
+
+    #[inline]
+    fn progress(&mut self, _batch: &RecordBatch) {}
+}
+
+impl CoopPermit for () {}
+
+pub trait CoopBudget: Send + Unpin + 'static {
+    type Permit: CoopPermit;
+
+    fn acquire_permit(&mut self) -> impl Future<Output = Self::Permit> + Send + 'static;
+}
+
+pub struct Unbounded;
+
+impl CoopBudget for Unbounded {
+    type Permit = ();
+
+    fn acquire_permit(&mut self) -> futures::future::Ready<()> {
+        futures::future::ready(())
     }
 }
 
@@ -640,25 +739,30 @@ impl<T> ParquetRecordBatchStream<T> {
     }
 }
 
-impl<T> Stream for ParquetRecordBatchStream<T>
+impl<T, C> Stream for ParquetRecordBatchStream<T, C>
 where
     T: AsyncFileReader + Unpin + Send + 'static,
+    C: CoopBudget,
 {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
             match &mut self.state {
-                StreamState::Decoding(batch_reader) => match batch_reader.next() {
-                    Some(Ok(batch)) => {
-                        return Poll::Ready(Some(Ok(batch)));
+                StreamState::Decoding(batch_reader, permit) => {
+                    ready!(permit.poll_proceed(cx));
+                    match batch_reader.next() {
+                        Some(Ok(batch)) => {
+                            permit.progress(&batch);
+                            return Poll::Ready(Some(Ok(batch)));
+                        }
+                        Some(Err(e)) => {
+                            self.state = StreamState::Error;
+                            return Poll::Ready(Some(Err(ParquetError::ArrowError(e.to_string()))));
+                        }
+                        None => self.state = StreamState::Init,
                     }
-                    Some(Err(e)) => {
-                        self.state = StreamState::Error;
-                        return Poll::Ready(Some(Err(ParquetError::ArrowError(e.to_string()))));
-                    }
-                    None => self.state = StreamState::Init,
-                },
+                }
                 StreamState::Init => {
                     let row_group_idx = match self.row_groups.pop_front() {
                         Some(idx) => idx,
@@ -687,7 +791,9 @@ where
                         self.reader = Some(reader_factory);
                         match maybe_reader {
                             // Read records from [`ParquetRecordBatchReader`]
-                            Some(reader) => self.state = StreamState::Decoding(reader),
+                            Some((reader, permit)) => {
+                                self.state = StreamState::Decoding(reader, permit)
+                            }
                             // All rows skipped, read next row group
                             None => self.state = StreamState::Init,
                         }
@@ -1574,6 +1680,7 @@ mod tests {
             filter: None,
             limit: None,
             offset: None,
+            coop_budget: Unbounded,
         };
 
         let mut skip = true;
