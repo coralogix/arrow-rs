@@ -913,6 +913,10 @@ pub(crate) fn evaluate_predicate(
     })
 }
 
+/// Maximum number of bytes that can be evaluated in a row filter
+/// before yielding back to the scheduler
+const DECODE_BUDGET: usize = 2 * 1024 * 1024;
+
 /// Evaluates an [`ArrowPredicate`], returning a [`RowSelection`] indicating
 /// which rows to return.
 ///
@@ -930,10 +934,14 @@ pub(crate) async fn evaluate_predicate_coop(
     input_selection: Option<RowSelection>,
     predicate: &mut dyn ArrowPredicate,
 ) -> Result<RowSelection> {
+    let mut budget = DECODE_BUDGET;
+
     let reader = ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
     let mut filters = vec![];
     for maybe_batch in reader {
         let maybe_batch = maybe_batch?;
+        budget = budget.saturating_sub(maybe_batch.get_array_memory_size());
+
         let input_rows = maybe_batch.num_rows();
         let filter = predicate.evaluate(maybe_batch)?;
         // Since user supplied predicate, check error here to catch bugs quickly
@@ -948,8 +956,13 @@ pub(crate) async fn evaluate_predicate_coop(
             _ => filters.push(prep_null_mask_filter(&filter)),
         };
 
-        #[cfg(feature = "async")]
-        tokio::task::consume_budget().await;
+        if budget == 0 {
+            // If we have consumed our decode budget, reset the budget and yield
+            // back to the scheduler
+            budget = DECODE_BUDGET;
+            #[cfg(feature = "async")]
+            tokio::task::yield_now().await;
+        }
     }
 
     let raw = RowSelection::from_filters(&filters);
