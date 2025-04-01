@@ -566,6 +566,8 @@ pub(crate) struct ArrayLevels {
 
     /// The arrow array
     array: ArrayRef,
+
+    def_levels_runs: Option<Vec<(i16, usize)>>,
 }
 
 impl PartialEq for ArrayLevels {
@@ -595,6 +597,7 @@ impl ArrayLevels {
             max_def_level,
             max_rep_level,
             array,
+            def_levels_runs: (max_def_level != 0).then(Vec::new),
         }
     }
 
@@ -668,6 +671,7 @@ mod tests {
             max_def_level: 2,
             max_rep_level: 2,
             array: Arc::new(primitives),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected);
     }
@@ -688,6 +692,7 @@ mod tests {
             max_def_level: 0,
             max_rep_level: 0,
             array,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -714,6 +719,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 0,
             array,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -748,6 +754,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 1,
             array: Arc::new(leaf_array),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -781,6 +788,7 @@ mod tests {
             max_def_level: 2,
             max_rep_level: 1,
             array: Arc::new(leaf_array),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -830,6 +838,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: Arc::new(leaf),
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_levels);
@@ -880,6 +889,7 @@ mod tests {
             max_def_level: 5,
             max_rep_level: 2,
             array: Arc::new(leaf),
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_levels);
@@ -917,6 +927,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 1,
             array: Arc::new(leaf),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -949,6 +960,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: Arc::new(leaf),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -997,6 +1009,7 @@ mod tests {
             max_def_level: 5,
             max_rep_level: 2,
             array: Arc::new(leaf),
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -1036,6 +1049,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 0,
             array: leaf,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -1075,6 +1089,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: Arc::new(a_values),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1167,6 +1182,7 @@ mod tests {
             max_def_level: 0,
             max_rep_level: 0,
             array: Arc::new(a),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1180,6 +1196,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 0,
             array: Arc::new(b),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1193,6 +1210,7 @@ mod tests {
             max_def_level: 2,
             max_rep_level: 0,
             array: Arc::new(d),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1206,6 +1224,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 0,
             array: Arc::new(f),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1312,6 +1331,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 1,
             array: map.keys().clone(),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1325,6 +1345,7 @@ mod tests {
             max_def_level: 2,
             max_rep_level: 1,
             array: map.values().clone(),
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1410,6 +1431,7 @@ mod tests {
             max_def_level: 4,
             max_rep_level: 1,
             array: values,
+            def_levels_runs: None,
         };
 
         assert_eq!(list_level, &expected_level);
@@ -1450,6 +1472,7 @@ mod tests {
             max_def_level: 4,
             max_rep_level: 1,
             array: values,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_level);
@@ -1535,6 +1558,7 @@ mod tests {
             max_def_level: 6,
             max_rep_level: 2,
             array: a1_values,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_level);
@@ -1546,6 +1570,7 @@ mod tests {
             max_def_level: 4,
             max_rep_level: 1,
             array: a2_values,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[1], &expected_level);
@@ -1584,6 +1609,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: values,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1734,6 +1760,7 @@ mod tests {
             max_def_level: 4,
             max_rep_level: 1,
             array: values_a,
+            def_levels_runs: None,
         };
         // [[{b: 2}, null], null, [null, null], [{b: 3}, {b: 4}]]
         let expected_b = ArrayLevels {
@@ -1743,6 +1770,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: values_b,
+            def_levels_runs: None,
         };
 
         assert_eq!(a_levels, &expected_a);
@@ -1774,6 +1802,7 @@ mod tests {
             max_def_level: 3,
             max_rep_level: 1,
             array: values,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1809,6 +1838,7 @@ mod tests {
             max_def_level: 5,
             max_rep_level: 2,
             array: values,
+            def_levels_runs: None,
         };
 
         assert_eq!(levels[0], expected_level);
@@ -1839,6 +1869,7 @@ mod tests {
             max_def_level: 1,
             max_rep_level: 0,
             array: Arc::new(dict),
+            def_levels_runs: None,
         };
         assert_eq!(levels[0], expected_level);
     }
