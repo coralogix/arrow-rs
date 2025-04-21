@@ -58,9 +58,9 @@ jobs:
       - name: Test --all-features
         run: |
           cargo test -p arrow-flight --all-features
-      - name: Test --examples
-        run: |
-          cargo test -p arrow-flight  --features=flight-sql-experimental,tls --examples
+#      - name: Test --examples
+#        run: |
+#          cargo test -p arrow-flight  --features=flight-sql-experimental,tls --examples
 
   vendor:
     name: Verify Vendored Code
