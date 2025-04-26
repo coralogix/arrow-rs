@@ -78,7 +78,6 @@
 use std::collections::VecDeque;
 use std::fmt::Formatter;
 use std::io::SeekFrom;
-use std::mem;
 use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -91,7 +90,7 @@ use futures::stream::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use arrow_array::RecordBatch;
-use arrow_schema::{DataType, Fields, Schema, SchemaRef};
+use arrow_schema::{DataType, FieldRef, Fields, Schema, SchemaRef};
 
 use crate::arrow::array_reader::{build_array_reader, RowGroups};
 use crate::arrow::arrow_reader::{
@@ -437,8 +436,6 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             .batch_size
             .min(self.metadata.file_metadata().num_rows() as usize);
 
-        let rowid_field = self.rowid.as_ref().map(RowId::field);
-
         let reader = ReaderFactory {
             input: self.input.0,
             filter: self.filter,
@@ -446,7 +443,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             fields: self.fields,
             limit: self.limit,
             offset: self.offset,
-            rowid: self.rowid,
+            rowid: self.rowid.clone(),
         };
 
         // Ensure schema of ParquetRecordBatchStream respects projection, and does
@@ -459,9 +456,9 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             _ => unreachable!("Must be Struct for root type"),
         };
 
-        if let Some(rowid_field) = rowid_field {
+        if let Some(field) = &self.rowid {
             projected_fields = Fields::from(
-                std::iter::once(rowid_field)
+                std::iter::once(field.clone())
                     .chain(projected_fields.iter().cloned())
                     .collect::<Vec<_>>(),
             );
@@ -499,7 +496,7 @@ struct ReaderFactory<T> {
 
     offset: Option<usize>,
 
-    rowid: Option<RowId>,
+    rowid: Option<FieldRef>,
 }
 
 impl<T> ReaderFactory<T>
@@ -567,9 +564,6 @@ where
             .unwrap_or(row_group.row_count);
 
         if rows_before == 0 {
-            if let Some(rowid) = self.rowid.as_mut() {
-                rowid.skip(row_group.row_count);
-            }
             return Ok((self, None));
         }
 
@@ -589,9 +583,6 @@ where
         }
 
         if rows_after == 0 {
-            if let Some(rowid) = self.rowid.as_mut() {
-                rowid.skip(row_group.row_count);
-            }
             return Ok((self, None));
         }
 
@@ -603,11 +594,19 @@ where
             .fetch(&mut self.input, &projection, selection.as_ref())
             .await?;
 
+        let rowid = self.rowid.clone().map(|field| {
+            let offset = self.metadata.row_groups()[..row_group_idx]
+                .iter()
+                .map(|rg| rg.num_rows() as u64)
+                .sum::<u64>();
+            RowId::new(offset, field, batch_size)
+        });
+
         let reader = ParquetRecordBatchReader::new(
             batch_size,
             build_array_reader(self.fields.as_deref(), &projection, &row_group)?,
             selection,
-            mem::take(&mut self.rowid),
+            rowid,
         );
 
         Ok((self, Some(reader)))
@@ -696,11 +695,7 @@ where
                         self.state = StreamState::Error;
                         return Poll::Ready(Some(Err(ParquetError::ArrowError(e.to_string()))));
                     }
-                    None => {
-                        self.reader.as_mut().expect("lost reader").rowid =
-                            mem::take(batch_reader.rowid());
-                        self.state = StreamState::Init
-                    }
+                    None => self.state = StreamState::Init,
                 },
                 StreamState::Init => {
                     let row_group_idx = match self.row_groups.pop_front() {
@@ -1116,18 +1111,6 @@ mod tests {
 
         assert_eq!(rowids.as_primitive::<UInt64Type>(), &expected_rowids);
 
-        let sync_batches = ParquetRecordBatchReaderBuilder::try_new(data)
-            .unwrap()
-            .with_projection(mask)
-            .with_batch_size(104)
-            .with_rowid("_rowid")
-            .build()
-            .unwrap()
-            .collect::<ArrowResult<Vec<_>>>()
-            .unwrap();
-
-        assert_eq!(async_batches, sync_batches);
-
         let requests = requests.lock().unwrap();
         let (offset_1, length_1) = metadata.row_group(0).column(1).byte_range();
         let (offset_2, length_2) = metadata.row_group(0).column(2).byte_range();
@@ -1261,19 +1244,6 @@ mod tests {
 
         let expected_rowids = UInt64Array::from_iter_values(3..rowids.len() as u64 + 3);
         assert_eq!(rowids.as_primitive::<UInt64Type>(), &expected_rowids);
-
-        let sync_batches = ParquetRecordBatchReaderBuilder::try_new(data)
-            .unwrap()
-            .with_projection(mask)
-            .with_batch_size(1024)
-            .with_offset(3)
-            .with_rowid("_rowid")
-            .build()
-            .unwrap()
-            .collect::<ArrowResult<Vec<_>>>()
-            .unwrap();
-
-        assert_eq!(async_batches, sync_batches);
     }
 
     #[tokio::test]

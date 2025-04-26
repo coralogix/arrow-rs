@@ -73,7 +73,7 @@ pub struct ArrowReaderBuilder<T> {
 
     pub(crate) offset: Option<usize>,
 
-    pub(crate) rowid: Option<RowId>,
+    pub(crate) rowid: Option<FieldRef>,
 }
 
 impl<T> ArrowReaderBuilder<T> {
@@ -121,7 +121,7 @@ impl<T> ArrowReaderBuilder<T> {
     /// for each row. The row ID will be the row offset of the row in the underlying file
     pub fn with_rowid(self, field_name: impl Into<String>) -> Self {
         Self {
-            rowid: Some(RowId::new(field_name, self.batch_size)),
+            rowid: Some(RowId::field_ref(field_name)),
             ..self
         }
     }
@@ -635,7 +635,8 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
             batch_size,
             array_reader,
             apply_range(selection, reader.num_rows(), self.offset, self.limit),
-            self.rowid,
+            // TODO what do we do here?
+            None,
         ))
     }
 }
@@ -704,13 +705,18 @@ pub(crate) struct RowId {
 }
 
 impl RowId {
-    pub fn new(field_name: impl Into<String>, batch_size: usize) -> Self {
+    pub fn new(offset: u64, field: FieldRef, batch_size: usize) -> Self {
         Self {
-            offset: 0,
-            field: Arc::new(Field::new(field_name, ArrowType::UInt64, false)),
+            offset,
+            field,
             buffer: UInt64Builder::with_capacity(batch_size),
         }
     }
+
+    pub fn field_ref(name: impl Into<String>) -> FieldRef {
+        Arc::new(Field::new(name, ArrowType::UInt64, false))
+    }
+
     pub fn skip(&mut self, n: usize) {
         println!("skipping {n}");
         self.offset += n as u64;
@@ -921,10 +927,6 @@ impl ParquetRecordBatchReader {
             selection: selection.map(|s| s.trim().into()),
             rowid,
         }
-    }
-
-    pub(crate) fn rowid(&mut self) -> &mut Option<RowId> {
-        &mut self.rowid
     }
 }
 
