@@ -718,7 +718,6 @@ impl RowId {
     }
 
     pub fn skip(&mut self, n: usize) {
-        println!("skipping {n}");
         self.offset += n as u64;
     }
 
@@ -727,7 +726,6 @@ impl RowId {
     }
 
     fn read(&mut self, n: usize) {
-        println!("reading {n}");
         // SAFETY: We are appending a `Range<u64>` which has a trusted length
         unsafe {
             self.buffer
