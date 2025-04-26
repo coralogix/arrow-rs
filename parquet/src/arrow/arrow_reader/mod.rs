@@ -17,16 +17,16 @@
 
 //! Contains reader which reads parquet data into arrow [`RecordBatch`]
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-
+use arrow_array::builder::UInt64Builder;
 use arrow_array::cast::AsArray;
-use arrow_array::Array;
+use arrow_array::{Array, ArrayRef};
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, DataType as ArrowType, Schema, SchemaRef};
+use arrow_schema::{ArrowError, DataType as ArrowType, Field, FieldRef, Schema, SchemaRef};
 use arrow_select::filter::prep_null_mask_filter;
 pub use filter::{ArrowPredicate, ArrowPredicateFn, RowFilter};
 pub use selection::{RowSelection, RowSelector};
+use std::collections::VecDeque;
+use std::sync::Arc;
 
 pub use crate::arrow::array_reader::RowGroups;
 use crate::arrow::array_reader::{build_array_reader, ArrayReader};
@@ -72,6 +72,8 @@ pub struct ArrowReaderBuilder<T> {
     pub(crate) limit: Option<usize>,
 
     pub(crate) offset: Option<usize>,
+
+    pub(crate) rowid: Option<RowId>,
 }
 
 impl<T> ArrowReaderBuilder<T> {
@@ -88,6 +90,7 @@ impl<T> ArrowReaderBuilder<T> {
             selection: None,
             limit: None,
             offset: None,
+            rowid: None,
         }
     }
 
@@ -112,6 +115,15 @@ impl<T> ArrowReaderBuilder<T> {
         // Try to avoid allocate large buffer
         let batch_size = batch_size.min(self.metadata.file_metadata().num_rows() as usize);
         Self { batch_size, ..self }
+    }
+
+    /// Project a column into the result with name `field_name` that will contain the row ID
+    /// for each row. The row ID will be the row offset of the row in the underlying file
+    pub fn with_rowid(self, field_name: impl Into<String>) -> Self {
+        Self {
+            rowid: Some(RowId::new(field_name, self.batch_size)),
+            ..self
+        }
     }
 
     /// Only read data from the provided row group indexes
@@ -623,6 +635,7 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
             batch_size,
             array_reader,
             apply_range(selection, reader.num_rows(), self.offset, self.limit),
+            self.rowid,
         ))
     }
 }
@@ -684,6 +697,44 @@ impl<T: ChunkReader + 'static> Iterator for ReaderPageIterator<T> {
 
 impl<T: ChunkReader + 'static> PageIterator for ReaderPageIterator<T> {}
 
+pub(crate) struct RowId {
+    offset: u64,
+    field: FieldRef,
+    buffer: UInt64Builder,
+}
+
+impl RowId {
+    pub fn new(field_name: impl Into<String>, batch_size: usize) -> Self {
+        Self {
+            offset: 0,
+            field: Arc::new(Field::new(field_name, ArrowType::UInt64, false)),
+            buffer: UInt64Builder::with_capacity(batch_size),
+        }
+    }
+    pub fn skip(&mut self, n: usize) {
+        println!("skipping {n}");
+        self.offset += n as u64;
+    }
+
+    pub fn field(&self) -> FieldRef {
+        self.field.clone()
+    }
+
+    fn read(&mut self, n: usize) {
+        println!("reading {n}");
+        // SAFETY: We are appending a `Range<u64>` which has a trusted length
+        unsafe {
+            self.buffer
+                .append_trusted_len_iter(self.offset..self.offset + n as u64)
+        }
+        self.offset += n as u64;
+    }
+
+    fn consume(&mut self) -> ArrayRef {
+        Arc::new(self.buffer.finish())
+    }
+}
+
 /// An `Iterator<Item = ArrowResult<RecordBatch>>` that yields [`RecordBatch`]
 /// read from a parquet data source
 pub struct ParquetRecordBatchReader {
@@ -691,6 +742,7 @@ pub struct ParquetRecordBatchReader {
     array_reader: Box<dyn ArrayReader>,
     schema: SchemaRef,
     selection: Option<VecDeque<RowSelector>>,
+    rowid: Option<RowId>,
 }
 
 impl Iterator for ParquetRecordBatchReader {
@@ -707,6 +759,10 @@ impl Iterator for ParquetRecordBatchReader {
                             Ok(skipped) => skipped,
                             Err(e) => return Some(Err(e.into())),
                         };
+
+                        if let Some(rowid) = self.rowid.as_mut() {
+                            rowid.skip(skipped);
+                        }
 
                         if skipped != front.row_count {
                             return Some(Err(general_err!(
@@ -738,16 +794,24 @@ impl Iterator for ParquetRecordBatchReader {
                     };
                     match self.array_reader.read_records(to_read) {
                         Ok(0) => break,
-                        Ok(rec) => read_records += rec,
+                        Ok(rec) => {
+                            if let Some(rowid) = self.rowid.as_mut() {
+                                rowid.read(rec);
+                            }
+                            read_records += rec
+                        }
                         Err(error) => return Some(Err(error.into())),
                     }
                 }
             }
-            None => {
-                if let Err(error) = self.array_reader.read_records(self.batch_size) {
-                    return Some(Err(error.into()));
+            None => match self.array_reader.read_records(self.batch_size) {
+                Ok(n) => {
+                    if let Some(rowid) = self.rowid.as_mut() {
+                        rowid.read(n);
+                    }
                 }
-            }
+                Err(error) => return Some(Err(error.into())),
+            },
         };
 
         match self.array_reader.consume_batch() {
@@ -761,7 +825,23 @@ impl Iterator for ParquetRecordBatchReader {
 
                 match struct_array {
                     Err(err) => Some(Err(err)),
-                    Ok(e) => (e.len() > 0).then(|| Ok(RecordBatch::from(e))),
+                    Ok(e) => {
+                        if e.len() > 0 {
+                            Some(Ok(match self.rowid.as_mut() {
+                                Some(rowid) => {
+                                    let columns = std::iter::once(rowid.consume())
+                                        .chain(e.columns().iter().cloned())
+                                        .collect();
+
+                                    RecordBatch::try_new(self.schema.clone(), columns)
+                                        .expect("invalid schema")
+                                }
+                                None => RecordBatch::from(e),
+                            }))
+                        } else {
+                            None
+                        }
+                    }
                 }
             }
         }
@@ -806,6 +886,7 @@ impl ParquetRecordBatchReader {
             array_reader,
             schema: Arc::new(Schema::new(levels.fields.clone())),
             selection: selection.map(|s| s.trim().into()),
+            rowid: None,
         })
     }
 
@@ -816,10 +897,21 @@ impl ParquetRecordBatchReader {
         batch_size: usize,
         array_reader: Box<dyn ArrayReader>,
         selection: Option<RowSelection>,
+        rowid: Option<RowId>,
     ) -> Self {
-        let schema = match array_reader.get_data_type() {
-            ArrowType::Struct(ref fields) => Schema::new(fields.clone()),
+        let struct_fields = match array_reader.get_data_type() {
+            ArrowType::Struct(ref fields) => fields.clone(),
             _ => unreachable!("Struct array reader's data type is not struct!"),
+        };
+
+        let schema = match rowid.as_ref() {
+            Some(rowid) => {
+                let fields: Vec<_> = std::iter::once(rowid.field())
+                    .chain(struct_fields.iter().cloned())
+                    .collect();
+                Schema::new(fields)
+            }
+            None => Schema::new(struct_fields),
         };
 
         Self {
@@ -827,7 +919,12 @@ impl ParquetRecordBatchReader {
             array_reader,
             schema: Arc::new(schema),
             selection: selection.map(|s| s.trim().into()),
+            rowid,
         }
+    }
+
+    pub(crate) fn rowid(&mut self) -> &mut Option<RowId> {
+        &mut self.rowid
     }
 }
 
@@ -887,7 +984,8 @@ pub(crate) fn evaluate_predicate(
     input_selection: Option<RowSelection>,
     predicate: &mut dyn ArrowPredicate,
 ) -> Result<RowSelection> {
-    let reader = ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
+    let reader =
+        ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone(), None);
     let mut filters = vec![];
     for maybe_batch in reader {
         let maybe_batch = maybe_batch?;
@@ -935,7 +1033,8 @@ pub(crate) async fn evaluate_predicate_coop(
 ) -> Result<RowSelection> {
     let mut budget = DECODE_BUDGET;
 
-    let reader = ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone());
+    let reader =
+        ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone(), None);
     let mut filters = vec![];
     for maybe_batch in reader {
         let maybe_batch = maybe_batch?;
