@@ -436,6 +436,9 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
         let batch_size = self
             .batch_size
             .min(self.metadata.file_metadata().num_rows() as usize);
+
+        let rowid_field = self.rowid.as_ref().map(RowId::field);
+
         let reader = ReaderFactory {
             input: self.input.0,
             filter: self.filter,
@@ -448,13 +451,22 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
 
         // Ensure schema of ParquetRecordBatchStream respects projection, and does
         // not store metadata (same as for ParquetRecordBatchReader and emitted RecordBatches)
-        let projected_fields = match reader.fields.as_deref().map(|pf| &pf.arrow_type) {
+        let mut projected_fields = match reader.fields.as_deref().map(|pf| &pf.arrow_type) {
             Some(DataType::Struct(fields)) => {
                 fields.filter_leaves(|idx, _| self.projection.leaf_included(idx))
             }
             None => Fields::empty(),
             _ => unreachable!("Must be Struct for root type"),
         };
+
+        if let Some(rowid_field) = rowid_field {
+            projected_fields = Fields::from(
+                std::iter::once(rowid_field)
+                    .chain(projected_fields.iter().cloned())
+                    .collect::<Vec<_>>(),
+            );
+        }
+
         let schema = Arc::new(Schema::new(projected_fields));
 
         Ok(ParquetRecordBatchStream {
@@ -1071,6 +1083,16 @@ mod tests {
             .with_rowid("_rowid")
             .build()
             .unwrap();
+
+        assert_eq!(
+            stream
+                .schema()
+                .fields()
+                .first()
+                .expect("no fields in schema")
+                .name(),
+            "_rowid"
+        );
 
         let async_batches: Vec<_> = stream.try_collect().await.unwrap();
 
