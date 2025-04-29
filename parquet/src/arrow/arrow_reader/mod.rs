@@ -74,6 +74,8 @@ pub struct ArrowReaderBuilder<T> {
     pub(crate) offset: Option<usize>,
 
     pub(crate) rowid: Option<FieldRef>,
+
+    pub(crate) prefetch: Option<ProjectionMask>,
 }
 
 impl<T> ArrowReaderBuilder<T> {
@@ -91,6 +93,7 @@ impl<T> ArrowReaderBuilder<T> {
             limit: None,
             offset: None,
             rowid: None,
+            prefetch: None,
         }
     }
 
@@ -140,6 +143,15 @@ impl<T> ArrowReaderBuilder<T> {
     pub fn with_projection(self, mask: ProjectionMask) -> Self {
         Self {
             projection: mask,
+            ..self
+        }
+    }
+
+    /// If evaluating a `RowFilter` also prefetch the columns in `mask`
+    /// while fetching row filter columns
+    pub fn with_prefetch(self, mask: Option<ProjectionMask>) -> Self {
+        Self {
+            prefetch: mask,
             ..self
         }
     }

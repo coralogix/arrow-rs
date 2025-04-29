@@ -444,6 +444,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             limit: self.limit,
             offset: self.offset,
             rowid: self.rowid.clone(),
+            prefetch: self.prefetch,
         };
 
         // Ensure schema of ParquetRecordBatchStream respects projection, and does
@@ -497,6 +498,8 @@ struct ReaderFactory<T> {
     offset: Option<usize>,
 
     rowid: Option<FieldRef>,
+
+    prefetch: Option<ProjectionMask>,
 }
 
 impl<T> ReaderFactory<T>
@@ -539,7 +542,12 @@ where
 
                 let predicate_projection = predicate.projection();
                 row_group
-                    .fetch(&mut self.input, predicate_projection, selection.as_ref())
+                    .fetch(
+                        &mut self.input,
+                        predicate_projection,
+                        self.prefetch.as_ref(),
+                        selection.as_ref(),
+                    )
                     .await?;
 
                 let array_reader =
@@ -591,7 +599,7 @@ where
         }
 
         row_group
-            .fetch(&mut self.input, &projection, selection.as_ref())
+            .fetch(&mut self.input, &projection, None, selection.as_ref())
             .await?;
 
         let rowid = self.rowid.clone().map(|field| {
@@ -756,6 +764,7 @@ impl<'a> InMemoryRowGroup<'a> {
         &mut self,
         input: &mut T,
         projection: &ProjectionMask,
+        prefetch: Option<&ProjectionMask>,
         selection: Option<&RowSelection>,
     ) -> Result<()> {
         if let Some((selection, offset_index)) = selection.zip(self.offset_index) {
@@ -769,9 +778,16 @@ impl<'a> InMemoryRowGroup<'a> {
                 .zip(self.metadata.columns())
                 .enumerate()
                 .filter(|&(idx, (chunk, _chunk_meta))| {
-                    chunk.is_none() && projection.leaf_included(idx)
+                    if prefetch.is_some_and(|p| p.leaf_included(idx)) {
+                        println!("prefetching column {}", idx);
+                    }
+                    println!("{prefetch:?}");
+                    chunk.is_none()
+                        && (projection.leaf_included(idx)
+                            || prefetch.is_some_and(|p| p.leaf_included(idx)))
                 })
                 .flat_map(|(idx, (_chunk, chunk_meta))| {
+                    println!("fetching {idx}");
                     // If the first page does not start at the beginning of the column,
                     // then we need to also fetch a dictionary page.
                     let mut ranges = vec![];
@@ -815,8 +831,13 @@ impl<'a> InMemoryRowGroup<'a> {
                 .column_chunks
                 .iter()
                 .enumerate()
-                .filter(|&(idx, chunk)| chunk.is_none() && projection.leaf_included(idx))
+                .filter(|&(idx, chunk)| {
+                    chunk.is_none()
+                        && (projection.leaf_included(idx)
+                            || prefetch.is_some_and(|p| p.leaf_included(idx)))
+                })
                 .map(|(idx, _chunk)| {
+                    println!("fetching {idx}");
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start as usize..(start + length) as usize
@@ -826,7 +847,10 @@ impl<'a> InMemoryRowGroup<'a> {
             let mut chunk_data = input.get_byte_ranges(fetch_ranges).await?.into_iter();
 
             for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-                if chunk.is_some() || !projection.leaf_included(idx) {
+                if chunk.is_some()
+                    || !(projection.leaf_included(idx)
+                        || prefetch.is_some_and(|p| p.leaf_included(idx)))
+                {
                     continue;
                 }
 
@@ -977,12 +1001,30 @@ mod tests {
         data: Bytes,
         metadata: Arc<ParquetMetaData>,
         requests: Arc<Mutex<Vec<Range<usize>>>>,
+        max_concurrent_requests: Arc<Mutex<usize>>,
     }
 
     impl AsyncFileReader for TestReader {
         fn get_bytes(&mut self, range: Range<usize>) -> BoxFuture<'_, Result<Bytes>> {
             self.requests.lock().unwrap().push(range.clone());
             futures::future::ready(Ok(self.data.slice(range))).boxed()
+        }
+
+        fn get_byte_ranges(
+            &mut self,
+            ranges: Vec<Range<usize>>,
+        ) -> BoxFuture<'_, Result<Vec<Bytes>>> {
+            self.requests.lock().unwrap().extend(ranges.clone());
+            let mut max = self.max_concurrent_requests.lock().unwrap();
+            if ranges.len() > *max {
+                *max = ranges.len();
+            }
+
+            let mut results = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                results.push(self.data.slice(range));
+            }
+            futures::future::ready(Ok(results)).boxed()
         }
 
         fn get_metadata(&mut self) -> BoxFuture<'_, Result<Arc<ParquetMetaData>>> {
@@ -1007,6 +1049,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let requests = async_reader.requests.clone();
@@ -1064,6 +1107,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let requests = async_reader.requests.clone();
@@ -1141,6 +1185,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let options = ArrowReaderOptions::new().with_page_index(true);
@@ -1209,6 +1254,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let builder = ParquetRecordBatchStreamBuilder::new(async_reader)
@@ -1263,6 +1309,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let builder = ParquetRecordBatchStreamBuilder::new(async_reader)
@@ -1309,6 +1356,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let options = ArrowReaderOptions::new().with_page_index(true);
@@ -1392,6 +1440,7 @@ mod tests {
                 data: data.clone(),
                 metadata: metadata.clone(),
                 requests: Default::default(),
+                max_concurrent_requests: Default::default(),
             };
 
             let options = ArrowReaderOptions::new().with_page_index(true);
@@ -1468,6 +1517,7 @@ mod tests {
                 data: data.clone(),
                 metadata: metadata.clone(),
                 requests: Default::default(),
+                max_concurrent_requests: Default::default(),
             };
 
             let options = ArrowReaderOptions::new().with_page_index(true);
@@ -1560,6 +1610,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let options = ArrowReaderOptions::new().with_page_index(true);
@@ -1610,8 +1661,10 @@ mod tests {
             data,
             metadata: Arc::new(metadata),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
         let requests = test.requests.clone();
+        let max_concurrent_requests = test.max_concurrent_requests.clone();
 
         let a_scalar = StringArray::from_iter_values(["b"]);
         let a_filter = ArrowPredicateFn::new(
@@ -1654,6 +1707,85 @@ mod tests {
 
         // Should only have made 3 requests
         assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(*max_concurrent_requests.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_row_filter_with_prefetch() {
+        let a = StringArray::from_iter_values(["a", "b", "b", "b", "c", "c"]);
+        let b = StringArray::from_iter_values(["1", "2", "3", "4", "5", "6"]);
+        let c = Int32Array::from_iter(0..6);
+        let data = RecordBatch::try_from_iter([
+            ("a", Arc::new(a) as ArrayRef),
+            ("b", Arc::new(b) as ArrayRef),
+            ("c", Arc::new(c) as ArrayRef),
+        ])
+        .unwrap();
+
+        let mut buf = Vec::with_capacity(1024);
+        let mut writer = ArrowWriter::try_new(&mut buf, data.schema(), None).unwrap();
+        writer.write(&data).unwrap();
+        writer.close().unwrap();
+
+        let data: Bytes = buf.into();
+        let metadata = ParquetMetaDataReader::new()
+            .parse_and_finish(&data)
+            .unwrap();
+        let parquet_schema = metadata.file_metadata().schema_descr_ptr();
+
+        let test = TestReader {
+            data,
+            metadata: Arc::new(metadata),
+            requests: Default::default(),
+            max_concurrent_requests: Default::default(),
+        };
+        let requests = test.requests.clone();
+        let max_concurrent_requests = test.max_concurrent_requests.clone();
+
+        let a_scalar = StringArray::from_iter_values(["b"]);
+        let a_filter = ArrowPredicateFn::new(
+            ProjectionMask::leaves(&parquet_schema, vec![0]),
+            move |batch| eq(batch.column(0), &Scalar::new(&a_scalar)),
+        );
+
+        let b_scalar = StringArray::from_iter_values(["4"]);
+        let b_filter = ArrowPredicateFn::new(
+            ProjectionMask::leaves(&parquet_schema, vec![1]),
+            move |batch| eq(batch.column(0), &Scalar::new(&b_scalar)),
+        );
+
+        let filter = RowFilter::new(vec![Box::new(a_filter), Box::new(b_filter)]);
+
+        let mask = ProjectionMask::leaves(&parquet_schema, vec![0, 2]);
+        let prefetch = ProjectionMask::leaves(&parquet_schema, vec![0, 2]);
+        let stream = ParquetRecordBatchStreamBuilder::new(test)
+            .await
+            .unwrap()
+            .with_projection(mask.clone())
+            .with_batch_size(1024)
+            .with_row_filter(filter)
+            .with_prefetch(Some(prefetch))
+            .build()
+            .unwrap();
+
+        let batches: Vec<_> = stream.try_collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 2);
+
+        let col = batch.column(0);
+        let val = col.as_any().downcast_ref::<StringArray>().unwrap().value(0);
+        assert_eq!(val, "b");
+
+        let col = batch.column(1);
+        let val = col.as_any().downcast_ref::<Int32Array>().unwrap().value(0);
+        assert_eq!(val, 3);
+
+        // Should only have made 4 requests
+        assert_eq!(requests.lock().unwrap().len(), 3);
+        assert_eq!(*max_concurrent_requests.lock().unwrap(), 2);
     }
 
     #[tokio::test]
@@ -1683,6 +1815,7 @@ mod tests {
             data,
             metadata: Arc::new(metadata),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
         let requests = test.requests.clone();
 
@@ -1765,6 +1898,7 @@ mod tests {
             data,
             metadata: Arc::new(metadata),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let stream = ParquetRecordBatchStreamBuilder::new(test.clone())
@@ -1870,6 +2004,7 @@ mod tests {
             data,
             metadata: Arc::new(metadata),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let stream = ParquetRecordBatchStreamBuilder::new(test.clone())
@@ -1975,6 +2110,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let a_filter =
@@ -2044,6 +2180,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let requests = async_reader.requests.clone();
@@ -2066,6 +2203,7 @@ mod tests {
             limit: None,
             offset: None,
             rowid: None,
+            prefetch: None,
         };
 
         let mut skip = true;
@@ -2121,6 +2259,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let builder = ParquetRecordBatchStreamBuilder::new(async_reader)
@@ -2266,6 +2405,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
         let builder = ParquetRecordBatchStreamBuilder::new(async_reader)
             .await
@@ -2303,6 +2443,7 @@ mod tests {
             data: data.clone(),
             metadata: metadata.clone(),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
 
         let mut builder = ParquetRecordBatchStreamBuilder::new(async_reader)
@@ -2440,6 +2581,7 @@ mod tests {
             data,
             metadata: Arc::new(metadata),
             requests: Default::default(),
+            max_concurrent_requests: Default::default(),
         };
         let requests = test.requests.clone();
 
