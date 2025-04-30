@@ -805,7 +805,10 @@ impl<'a> InMemoryRowGroup<'a> {
             let mut page_start_offsets = page_start_offsets.into_iter();
 
             for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
-                if chunk.is_some() || !projection.leaf_included(idx) {
+                if chunk.is_some()
+                    || !projection.leaf_included(idx)
+                    || !prefetch.is_some_and(|p| p.leaf_included(idx))
+                {
                     continue;
                 }
 
@@ -842,8 +845,8 @@ impl<'a> InMemoryRowGroup<'a> {
 
             for (idx, chunk) in self.column_chunks.iter_mut().enumerate() {
                 if chunk.is_some()
-                    || !(projection.leaf_included(idx)
-                        || prefetch.is_some_and(|p| p.leaf_included(idx)))
+                    || !projection.leaf_included(idx)
+                    || !prefetch.is_some_and(|p| p.leaf_included(idx))
                 {
                     continue;
                 }
