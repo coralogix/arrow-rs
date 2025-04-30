@@ -783,11 +783,6 @@ impl<'a> InMemoryRowGroup<'a> {
                             || prefetch.is_some_and(|p| p.leaf_included(idx)))
                 })
                 .flat_map(|(idx, (_chunk, chunk_meta))| {
-                    println!(
-                        "fetching column {idx}: {}",
-                        self.metadata.schema_descr().column(idx).name()
-                    );
-
                     // If the first page does not start at the beginning of the column,
                     // then we need to also fetch a dictionary page.
                     let mut ranges = vec![];
@@ -840,10 +835,6 @@ impl<'a> InMemoryRowGroup<'a> {
                             || prefetch.is_some_and(|p| p.leaf_included(idx)))
                 })
                 .map(|(idx, _chunk)| {
-                    println!(
-                        "fetching column {idx}: {}",
-                        self.metadata.schema_descr().column(idx).name()
-                    );
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start as usize..(start + length) as usize
