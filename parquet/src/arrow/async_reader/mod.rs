@@ -778,16 +778,11 @@ impl<'a> InMemoryRowGroup<'a> {
                 .zip(self.metadata.columns())
                 .enumerate()
                 .filter(|&(idx, (chunk, _chunk_meta))| {
-                    if prefetch.is_some_and(|p| p.leaf_included(idx)) {
-                        println!("prefetching column {}", idx);
-                    }
-                    println!("{prefetch:?}");
                     chunk.is_none()
                         && (projection.leaf_included(idx)
                             || prefetch.is_some_and(|p| p.leaf_included(idx)))
                 })
                 .flat_map(|(idx, (_chunk, chunk_meta))| {
-                    println!("fetching {idx}");
                     // If the first page does not start at the beginning of the column,
                     // then we need to also fetch a dictionary page.
                     let mut ranges = vec![];
@@ -837,7 +832,6 @@ impl<'a> InMemoryRowGroup<'a> {
                             || prefetch.is_some_and(|p| p.leaf_included(idx)))
                 })
                 .map(|(idx, _chunk)| {
-                    println!("fetching {idx}");
                     let column = self.metadata.column(idx);
                     let (start, length) = column.byte_range();
                     start as usize..(start + length) as usize
