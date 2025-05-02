@@ -83,14 +83,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arrow_array::RecordBatch;
+use arrow_schema::{DataType, Fields, Schema, SchemaRef};
 use bytes::{Buf, Bytes};
 use futures::future::{BoxFuture, FutureExt};
 use futures::ready;
 use futures::stream::Stream;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
-
-use arrow_array::RecordBatch;
-use arrow_schema::{DataType, Fields, Schema, SchemaRef};
+use tracing::info;
 
 use crate::arrow::array_reader::{build_array_reader, RowGroups};
 use crate::arrow::arrow_reader::{
@@ -782,6 +782,12 @@ impl<'a> InMemoryRowGroup<'a> {
                         chunks.push(chunk_data.next().unwrap());
                     }
 
+                    info!(
+                        "selection,{:?},{},{}",
+                        self.metadata.total_byte_size(),
+                        self.metadata.columns()[idx].column_path().to_string(),
+                        chunks.iter().fold(0, |acc, cur| acc + cur.len())
+                    );
                     *chunk = Some(Arc::new(ColumnChunkData::Sparse {
                         length: self.metadata.column(idx).byte_range().1 as usize,
                         data: offsets.into_iter().zip(chunks.into_iter()).collect(),
@@ -809,6 +815,12 @@ impl<'a> InMemoryRowGroup<'a> {
                 }
 
                 if let Some(data) = chunk_data.next() {
+                    info!(
+                        "no selection,{:?},{},{}",
+                        self.metadata.total_byte_size(),
+                        self.metadata.columns()[idx].column_path().to_string(),
+                        data.len()
+                    );
                     *chunk = Some(Arc::new(ColumnChunkData::Dense {
                         offset: self.metadata.column(idx).byte_range().0 as usize,
                         data,
