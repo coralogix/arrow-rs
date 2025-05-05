@@ -73,7 +73,7 @@ pub struct ArrowReaderBuilder<T> {
 
     pub(crate) offset: Option<usize>,
 
-    pub(crate) rowid: Option<FieldRef>,
+    pub(crate) row_id: Option<FieldRef>,
 
     pub(crate) prefetch: Option<ProjectionMask>,
 }
@@ -92,7 +92,7 @@ impl<T> ArrowReaderBuilder<T> {
             selection: None,
             limit: None,
             offset: None,
-            rowid: None,
+            row_id: None,
             prefetch: None,
         }
     }
@@ -122,9 +122,9 @@ impl<T> ArrowReaderBuilder<T> {
 
     /// Project a column into the result with name `field_name` that will contain the row ID
     /// for each row. The row ID will be the row offset of the row in the underlying file
-    pub fn with_rowid(self, field_name: impl Into<String>) -> Self {
+    pub fn with_row_id(self, field_name: impl Into<String>) -> Self {
         Self {
-            rowid: Some(RowId::field_ref(field_name)),
+            row_id: Some(RowId::field_ref(field_name)),
             ..self
         }
     }
@@ -758,7 +758,7 @@ pub struct ParquetRecordBatchReader {
     array_reader: Box<dyn ArrayReader>,
     schema: SchemaRef,
     selection: Option<VecDeque<RowSelector>>,
-    rowid: Option<RowId>,
+    row_id: Option<RowId>,
 }
 
 impl Iterator for ParquetRecordBatchReader {
@@ -776,8 +776,8 @@ impl Iterator for ParquetRecordBatchReader {
                             Err(e) => return Some(Err(e.into())),
                         };
 
-                        if let Some(rowid) = self.rowid.as_mut() {
-                            rowid.skip(skipped);
+                        if let Some(row_id) = self.row_id.as_mut() {
+                            row_id.skip(skipped);
                         }
 
                         if skipped != front.row_count {
@@ -811,7 +811,7 @@ impl Iterator for ParquetRecordBatchReader {
                     match self.array_reader.read_records(to_read) {
                         Ok(0) => break,
                         Ok(rec) => {
-                            if let Some(rowid) = self.rowid.as_mut() {
+                            if let Some(rowid) = self.row_id.as_mut() {
                                 rowid.read(rec);
                             }
                             read_records += rec
@@ -822,7 +822,7 @@ impl Iterator for ParquetRecordBatchReader {
             }
             None => match self.array_reader.read_records(self.batch_size) {
                 Ok(n) => {
-                    if let Some(rowid) = self.rowid.as_mut() {
+                    if let Some(rowid) = self.row_id.as_mut() {
                         rowid.read(n);
                     }
                 }
@@ -843,7 +843,7 @@ impl Iterator for ParquetRecordBatchReader {
                     Err(err) => Some(Err(err)),
                     Ok(e) => {
                         if e.len() > 0 {
-                            Some(Ok(match self.rowid.as_mut() {
+                            Some(Ok(match self.row_id.as_mut() {
                                 Some(rowid) => {
                                     let columns = std::iter::once(rowid.consume())
                                         .chain(e.columns().iter().cloned())
@@ -902,7 +902,7 @@ impl ParquetRecordBatchReader {
             array_reader,
             schema: Arc::new(Schema::new(levels.fields.clone())),
             selection: selection.map(|s| s.trim().into()),
-            rowid: None,
+            row_id: None,
         })
     }
 
@@ -935,7 +935,7 @@ impl ParquetRecordBatchReader {
             array_reader,
             schema: Arc::new(schema),
             selection: selection.map(|s| s.trim().into()),
-            rowid,
+            row_id: rowid,
         }
     }
 }

@@ -443,7 +443,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             fields: self.fields,
             limit: self.limit,
             offset: self.offset,
-            rowid: self.rowid.clone(),
+            rowid: self.row_id.clone(),
             prefetch: self.prefetch,
         };
 
@@ -457,7 +457,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             _ => unreachable!("Must be Struct for root type"),
         };
 
-        if let Some(field) = &self.rowid {
+        if let Some(field) = &self.row_id {
             projected_fields = Fields::from(
                 std::iter::once(field.clone())
                     .chain(projected_fields.iter().cloned())
@@ -1116,7 +1116,7 @@ mod tests {
         let stream = builder
             .with_projection(mask.clone())
             .with_batch_size(1024)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
@@ -1263,7 +1263,7 @@ mod tests {
             .with_projection(mask.clone())
             .with_batch_size(1024)
             .with_offset(3)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
@@ -1528,7 +1528,7 @@ mod tests {
             let stream = builder
                 .with_projection(mask.clone())
                 .with_row_selection(selection.clone())
-                .with_rowid("_rowid")
+                .with_row_id("_rowid")
                 .build()
                 .expect("building stream");
 
@@ -1780,13 +1780,13 @@ mod tests {
         let val = col.as_any().downcast_ref::<Int32Array>().unwrap().value(0);
         assert_eq!(val, 3);
 
-        // Should only have made 4 requests
+        // Should only have made 3 requests
         assert_eq!(requests.lock().unwrap().len(), 3);
         assert_eq!(*max_concurrent_requests.lock().unwrap(), 2);
     }
 
     #[tokio::test]
-    async fn test_async_reader_with_rowid_and_row_filter() {
+    async fn test_async_reader_with_row_id_and_row_filter() {
         let a = StringArray::from_iter_values(["a", "b", "b", "b", "c", "c"]);
         let b = StringArray::from_iter_values(["1", "2", "3", "4", "5", "6"]);
         let c = Int32Array::from_iter(0..6);
@@ -1837,7 +1837,7 @@ mod tests {
             .with_projection(mask.clone())
             .with_batch_size(1024)
             .with_row_filter(filter)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
@@ -2009,7 +2009,7 @@ mod tests {
             .unwrap()
             .with_batch_size(1024)
             .with_limit(4)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
@@ -2040,7 +2040,7 @@ mod tests {
             .unwrap()
             .with_offset(2)
             .with_limit(3)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
@@ -2071,7 +2071,7 @@ mod tests {
             .unwrap()
             .with_offset(4)
             .with_limit(20)
-            .with_rowid("_rowid")
+            .with_row_id("_rowid")
             .build()
             .unwrap();
 
