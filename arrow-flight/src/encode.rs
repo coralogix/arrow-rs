@@ -409,7 +409,7 @@ impl Stream for FlightDataEncoder {
         loop {
             self.poll_count += 1;
 
-            println!("flight data encoder polling next, {}", self.reader_id);
+            println!("flight data encoder polling next, {}/{}", self.reader_id, self.poll_count);
             if self.done && self.queue.is_empty() {
                 println!(
                     "flight data encoder stream done, no more data to send, {}/{}",
