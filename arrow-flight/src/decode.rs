@@ -236,6 +236,8 @@ pub struct FlightDataDecoder {
     done: bool,
 
     reader_id: String,
+
+    poll_count: usize,
 }
 
 impl Debug for FlightDataDecoder {
@@ -259,6 +261,7 @@ impl FlightDataDecoder {
             response: response.boxed(),
             done: false,
             reader_id: reader_id.to_string(),
+            poll_count: 0,
         }
     }
 
@@ -357,24 +360,37 @@ impl futures::Stream for FlightDataDecoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         if self.done {
-            println!("stream done, {}", self.reader_id);
+            println!(
+                "flight data decoder - stream done, {}/{}",
+                self.reader_id, self.poll_count
+            );
             return Poll::Ready(None);
         }
+        self.poll_count += 1;
         loop {
-            println!("polling next message, {}", self.reader_id);
+            println!(
+                "flight data decoder polling next, {}/{}",
+                self.reader_id, self.poll_count
+            );
             let res = ready!(self.response.poll_next_unpin(cx));
 
             return Poll::Ready(match res {
                 None => {
                     self.done = true;
-                    println!("inner is exhausted, {}", self.reader_id);
+                    println!(
+                        "flight data decoder inner is exhausted, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     None // inner is exhausted
                 }
                 Some(data) => Some(match data {
                     Err(e) => Err(e),
                     Ok(data) => match self.extract_message(data) {
                         Ok(Some(extracted)) => {
-                            println!("message extracted, {}", self.reader_id);
+                            println!(
+                                "flight data decoder message extracted, {}/{}",
+                                self.reader_id, self.poll_count
+                            );
                             Ok(extracted)
                         }
                         Ok(None) => continue, // Need next input message

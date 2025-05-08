@@ -290,6 +290,8 @@ pub struct FlightDataEncoder {
     dictionary_handling: DictionaryHandling,
 
     reader_id: String,
+
+    poll_count: usize,
 }
 
 impl FlightDataEncoder {
@@ -318,6 +320,7 @@ impl FlightDataEncoder {
             descriptor,
             dictionary_handling,
             reader_id: reader_id.to_string(),
+            poll_count: 0,
         };
 
         // If schema is known up front, enqueue it immediately
@@ -404,15 +407,23 @@ impl Stream for FlightDataEncoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
+            self.poll_count += 1;
+
             println!("flight data encoder polling next, {}", self.reader_id);
             if self.done && self.queue.is_empty() {
-                println!("stream done, no more data to send, {}", self.reader_id);
+                println!(
+                    "flight data encoder stream done, no more data to send, {}/{}",
+                    self.reader_id, self.poll_count
+                );
                 return Poll::Ready(None);
             }
 
             // Any messages queued to send?
             if let Some(data) = self.queue.pop_front() {
-                println!("sending queued message, {}", self.reader_id);
+                println!(
+                    "flight data encoder sending queued message, {}/{}",
+                    self.reader_id, self.poll_count
+                );
                 return Poll::Ready(Some(Ok(data)));
             }
 
@@ -425,7 +436,10 @@ impl Stream for FlightDataEncoder {
                     self.done = true;
                     // queue must also be empty so we are done
                     assert!(self.queue.is_empty());
-                    println!("stream done, no more data to send, {}", self.reader_id);
+                    println!(
+                        "flight data encoder stream done, no more data to send, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     return Poll::Ready(None);
                 }
                 Some(Err(e)) => {
@@ -435,7 +449,10 @@ impl Stream for FlightDataEncoder {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Some(Ok(batch)) => {
-                    println!("got batch, {}", self.reader_id);
+                    println!(
+                        "flight data encoder got batch, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     // had data, encode into the queue
                     if let Err(e) = self.encode_batch(batch) {
                         self.done = true;
