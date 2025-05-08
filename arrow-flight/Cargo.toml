@@ -49,7 +49,6 @@ prost = { version = "0.13.1", default-features = false, features = ["prost-deriv
 prost-types = { version = "0.13.1", default-features = false }
 tokio = { version = "1.0", default-features = false, features = ["macros", "rt", "rt-multi-thread"] }
 tonic = { version = "0.13", default-features = false, features = ["transport", "codegen", "prost"] }
-tracing = { version = "0.1.40", features = ["default", "log"] }
 
 # CLI-related dependencies
 anyhow = { version = "1.0", optional = true }

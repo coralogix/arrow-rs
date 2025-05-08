@@ -23,7 +23,6 @@ use bytes::Bytes;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
 use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
 use tonic::metadata::MetadataMap;
-use tracing::debug;
 
 use crate::error::{FlightError, Result};
 
@@ -358,24 +357,24 @@ impl futures::Stream for FlightDataDecoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         if self.done {
-            debug!(self.reader_id, "stream done");
+            println!("stream done, {}", self.reader_id);
             return Poll::Ready(None);
         }
         loop {
-            debug!(self.reader_id, "polling next message");
+            println!("polling next message, {}", self.reader_id);
             let res = ready!(self.response.poll_next_unpin(cx));
 
             return Poll::Ready(match res {
                 None => {
                     self.done = true;
-                    debug!(self.reader_id, "inner is exhausted");
+                    println!("inner is exhausted, {}", self.reader_id);
                     None // inner is exhausted
                 }
                 Some(data) => Some(match data {
                     Err(e) => Err(e),
                     Ok(data) => match self.extract_message(data) {
                         Ok(Some(extracted)) => {
-                            debug!(self.reader_id, "message extracted");
+                            println!("message extracted, {}", self.reader_id);
                             Ok(extracted)
                         }
                         Ok(None) => continue, // Need next input message

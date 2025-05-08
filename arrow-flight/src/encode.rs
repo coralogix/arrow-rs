@@ -25,7 +25,6 @@ use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef, UnionMode};
 use bytes::Bytes;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
-use tracing::debug;
 
 /// Creates a [`Stream`] of [`FlightData`]s from a
 /// `Stream` of [`Result`]<[`RecordBatch`], [`FlightError`]>.
@@ -405,21 +404,15 @@ impl Stream for FlightDataEncoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
-            debug!(
-                reader_id = self.reader_id,
-                "flight data encoder polling next"
-            );
+            println!("flight data encoder polling next, {}", self.reader_id);
             if self.done && self.queue.is_empty() {
-                debug!(
-                    reader_id = self.reader_id,
-                    "stream done, no more data to send"
-                );
+                println!("stream done, no more data to send, {}", self.reader_id);
                 return Poll::Ready(None);
             }
 
             // Any messages queued to send?
             if let Some(data) = self.queue.pop_front() {
-                debug!(reader_id = self.reader_id, "sending queued message");
+                println!("sending queued message, {}", self.reader_id);
                 return Poll::Ready(Some(Ok(data)));
             }
 
@@ -432,10 +425,7 @@ impl Stream for FlightDataEncoder {
                     self.done = true;
                     // queue must also be empty so we are done
                     assert!(self.queue.is_empty());
-                    debug!(
-                        reader_id = self.reader_id,
-                        "stream done, no more data to send"
-                    );
+                    println!("stream done, no more data to send, {}", self.reader_id);
                     return Poll::Ready(None);
                 }
                 Some(Err(e)) => {
@@ -445,7 +435,7 @@ impl Stream for FlightDataEncoder {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Some(Ok(batch)) => {
-                    debug!(reader_id = self.reader_id, "got batch");
+                    println!("got batch, {}", self.reader_id);
                     // had data, encode into the queue
                     if let Err(e) = self.encode_batch(batch) {
                         self.done = true;
