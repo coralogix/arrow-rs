@@ -211,6 +211,7 @@ impl FlightClient {
 
         Ok(FlightRecordBatchStream::new_from_flight_data(
             response_stream.map_err(FlightError::Tonic),
+            "",
         )
         .with_headers(md)
         .with_trailers(trailers))
@@ -429,7 +430,10 @@ impl FlightClient {
         let error_stream = FallibleTonicResponseStream::new(receiver, response_stream);
 
         // combine the response from the server and any error from the client
-        Ok(FlightRecordBatchStream::new_from_flight_data(error_stream))
+        Ok(FlightRecordBatchStream::new_from_flight_data(
+            error_stream,
+            "",
+        ))
     }
 
     /// Make a `ListFlights` call to the server with the provided

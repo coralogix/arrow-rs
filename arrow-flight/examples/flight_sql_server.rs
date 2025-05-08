@@ -458,7 +458,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -485,7 +485,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -525,7 +525,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -548,7 +548,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -602,7 +602,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }

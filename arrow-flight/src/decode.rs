@@ -23,6 +23,7 @@ use bytes::Bytes;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
 use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
 use tonic::metadata::MetadataMap;
+use tracing::debug;
 
 use crate::error::{FlightError, Result};
 
@@ -101,12 +102,12 @@ impl FlightRecordBatchStream {
     }
 
     /// Create a new [`FlightRecordBatchStream`] from a stream of [`FlightData`]
-    pub fn new_from_flight_data<S>(inner: S) -> Self
+    pub fn new_from_flight_data<S>(inner: S, reader_id: &str) -> Self
     where
         S: Stream<Item = Result<FlightData>> + Send + 'static,
     {
         Self {
-            inner: FlightDataDecoder::new(inner),
+            inner: FlightDataDecoder::new(inner, reader_id),
             headers: MetadataMap::default(),
             trailers: None,
         }
@@ -234,6 +235,8 @@ pub struct FlightDataDecoder {
     state: Option<FlightStreamState>,
     /// Seen the end of the inner stream?
     done: bool,
+
+    reader_id: String,
 }
 
 impl Debug for FlightDataDecoder {
@@ -248,7 +251,7 @@ impl Debug for FlightDataDecoder {
 
 impl FlightDataDecoder {
     /// Create a new wrapper around the stream of [`FlightData`]
-    pub fn new<S>(response: S) -> Self
+    pub fn new<S>(response: S, reader_id: &str) -> Self
     where
         S: Stream<Item = Result<FlightData>> + Send + 'static,
     {
@@ -256,6 +259,7 @@ impl FlightDataDecoder {
             state: None,
             response: response.boxed(),
             done: false,
+            reader_id: reader_id.to_string(),
         }
     }
 
@@ -354,20 +358,26 @@ impl futures::Stream for FlightDataDecoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         if self.done {
+            debug!(self.reader_id, "stream done");
             return Poll::Ready(None);
         }
         loop {
+            debug!(self.reader_id, "polling next message");
             let res = ready!(self.response.poll_next_unpin(cx));
 
             return Poll::Ready(match res {
                 None => {
                     self.done = true;
+                    debug!(self.reader_id, "inner is exhausted");
                     None // inner is exhausted
                 }
                 Some(data) => Some(match data {
                     Err(e) => Err(e),
                     Ok(data) => match self.extract_message(data) {
-                        Ok(Some(extracted)) => Ok(extracted),
+                        Ok(Some(extracted)) => {
+                            debug!(self.reader_id, "message extracted");
+                            Ok(extracted)
+                        }
                         Ok(None) => continue, // Need next input message
                         Err(e) => Err(e),
                     },

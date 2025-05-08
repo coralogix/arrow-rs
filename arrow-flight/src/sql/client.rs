@@ -247,7 +247,7 @@ impl FlightSqlServiceClient<Channel> {
         let descriptor = FlightDescriptor::new_cmd(command.as_any().encode_to_vec());
         let flight_data = FlightDataEncoderBuilder::new()
             .with_flight_descriptor(Some(descriptor))
-            .build(stream);
+            .build(stream, "");
 
         // Intercept client errors and send them to the one shot channel above
         let flight_data = Box::pin(flight_data);
@@ -310,6 +310,7 @@ impl FlightSqlServiceClient<Channel> {
 
         Ok(FlightRecordBatchStream::new_from_flight_data(
             response_stream.map_err(FlightError::Tonic),
+            "",
         )
         .with_headers(md)
         .with_trailers(trailers))
@@ -627,9 +628,10 @@ impl PreparedStatement<Channel> {
                 .with_flight_descriptor(Some(descriptor))
                 .with_schema(params_batch.schema());
             let flight_data = flight_stream_builder
-                .build(futures::stream::iter(
-                    self.parameter_binding.clone().map(Ok),
-                ))
+                .build(
+                    futures::stream::iter(self.parameter_binding.clone().map(Ok)),
+                    "",
+                )
                 .try_collect::<Vec<_>>()
                 .await
                 .map_err(flight_error_to_arrow_error)?;
