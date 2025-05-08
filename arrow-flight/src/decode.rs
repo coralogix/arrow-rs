@@ -21,7 +21,7 @@ use arrow_buffer::Buffer;
 use arrow_schema::{Schema, SchemaRef};
 use bytes::Bytes;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
-use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
+use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll, time::Instant};
 use tonic::metadata::MetadataMap;
 
 use crate::error::{FlightError, Result};
@@ -372,7 +372,14 @@ impl futures::Stream for FlightDataDecoder {
                 "flight data decoder polling next, {}/{}",
                 self.reader_id, self.poll_count
             );
+            let now = Instant::now();
             let res = ready!(self.response.poll_next_unpin(cx));
+            println!(
+                "flight data decoder polled next, {}/{} - took {:?}",
+                self.reader_id,
+                self.poll_count,
+                now.elapsed()
+            );
 
             return Poll::Ready(match res {
                 None => {

@@ -409,7 +409,10 @@ impl Stream for FlightDataEncoder {
         loop {
             self.poll_count += 1;
 
-            println!("flight data encoder polling next, {}/{}", self.reader_id, self.poll_count);
+            println!(
+                "flight data encoder polling next, {}/{}",
+                self.reader_id, self.poll_count
+            );
             if self.done && self.queue.is_empty() {
                 println!(
                     "flight data encoder stream done, no more data to send, {}/{}",
@@ -428,7 +431,14 @@ impl Stream for FlightDataEncoder {
             }
 
             // Get next batch
+            let now = std::time::Instant::now();
             let batch = ready!(self.inner.poll_next_unpin(cx));
+            println!(
+                "flight data encoder polled next, {}/{} - took {:?}",
+                self.reader_id,
+                self.poll_count,
+                now.elapsed()
+            );
 
             match batch {
                 None => {
