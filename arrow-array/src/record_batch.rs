@@ -20,7 +20,6 @@
 
 use crate::{new_empty_array, Array, ArrayRef, StructArray};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaBuilder, SchemaRef};
-use log::error;
 use std::backtrace::Backtrace;
 use std::ops::Index;
 use std::sync::Arc;
@@ -287,7 +286,7 @@ impl RecordBatch {
         // check that number of fields in schema match column length
         if schema.fields().len() != columns.len() {
             let bt = Backtrace::capture();
-            error!("columns must match fields:\n{:#?}", bt);
+            println!("columns must match fields:\n{:#?}", bt);
             return Err(ArrowError::InvalidArgumentError(format!(
                 "number of columns({}) must match number of fields({}) in schema",
                 columns.len(),
