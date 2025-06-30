@@ -95,3 +95,4 @@ parquet = { version = "53.4.1", path = "./parquet", default-features = false }
 
 backtrace = "0.3"
 chrono = { version = "0.4.41", default-features = false, features = ["clock"] }
+log = "^0.4"

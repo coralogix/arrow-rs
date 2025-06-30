@@ -49,6 +49,7 @@ chrono-tz = { version = "0.10", optional = true }
 num = { version = "0.4.1", default-features = false, features = ["std"] }
 half = { version = "2.1", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.15.1", default-features = false }
+log.workspace = true
 
 [features]
 ffi = ["arrow-schema/ffi", "arrow-data/ffi"]

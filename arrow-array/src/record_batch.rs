@@ -23,6 +23,7 @@ use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaBuilder, SchemaRef
 use std::backtrace::Backtrace;
 use std::ops::Index;
 use std::sync::Arc;
+use log::error;
 
 /// Trait for types that can read `RecordBatch`'s.
 ///
@@ -286,7 +287,7 @@ impl RecordBatch {
         // check that number of fields in schema match column length
         if schema.fields().len() != columns.len() {
             let bt = Backtrace::capture();
-            println!("columns must match fields:\n{:#?}", bt);
+            error!("columns must match fields:\n{:#?}", bt);
             return Err(ArrowError::InvalidArgumentError(format!(
                 "number of columns({}) must match number of fields({}) in schema",
                 columns.len(),
