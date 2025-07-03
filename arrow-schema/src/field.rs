@@ -695,13 +695,12 @@ impl Field {
     /// assert!(field.is_nullable());
     /// ```
     pub fn try_merge(&mut self, from: &Field) -> Result<(), ArrowError> {
-        #[allow(deprecated)]
-        if from.dict_id != self.dict_id {
-            return Err(ArrowError::SchemaError(format!(
-                "Fail to merge schema field '{}' because from dict_id = {} does not match {}",
-                self.name, from.dict_id, self.dict_id
-            )));
-        }
+        // if from.dict_id != self.dict_id {
+        //     return Err(ArrowError::SchemaError(format!(
+        //         "Fail to merge schema field '{}' because from dict_id = {} does not match {}",
+        //         self.name, from.dict_id, self.dict_id
+        //     )));
+        // }
         if from.dict_is_ordered != self.dict_is_ordered {
             return Err(ArrowError::SchemaError(format!(
                 "Fail to merge schema field '{}' because from dict_is_ordered = {} does not match {}",
