@@ -21,7 +21,7 @@ use arrow_buffer::Buffer;
 use arrow_schema::{Schema, SchemaRef};
 use bytes::Bytes;
 use futures::{ready, stream::BoxStream, Stream, StreamExt};
-use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll};
+use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc, task::Poll, time::Instant};
 use tonic::metadata::MetadataMap;
 
 use crate::error::{FlightError, Result};
@@ -101,12 +101,12 @@ impl FlightRecordBatchStream {
     }
 
     /// Create a new [`FlightRecordBatchStream`] from a stream of [`FlightData`]
-    pub fn new_from_flight_data<S>(inner: S) -> Self
+    pub fn new_from_flight_data<S>(inner: S, reader_id: &str) -> Self
     where
         S: Stream<Item = Result<FlightData>> + Send + 'static,
     {
         Self {
-            inner: FlightDataDecoder::new(inner),
+            inner: FlightDataDecoder::new(inner, reader_id),
             headers: MetadataMap::default(),
             trailers: None,
         }
@@ -234,6 +234,10 @@ pub struct FlightDataDecoder {
     state: Option<FlightStreamState>,
     /// Seen the end of the inner stream?
     done: bool,
+
+    reader_id: String,
+
+    poll_count: usize,
 }
 
 impl Debug for FlightDataDecoder {
@@ -248,7 +252,7 @@ impl Debug for FlightDataDecoder {
 
 impl FlightDataDecoder {
     /// Create a new wrapper around the stream of [`FlightData`]
-    pub fn new<S>(response: S) -> Self
+    pub fn new<S>(response: S, reader_id: &str) -> Self
     where
         S: Stream<Item = Result<FlightData>> + Send + 'static,
     {
@@ -256,6 +260,8 @@ impl FlightDataDecoder {
             state: None,
             response: response.boxed(),
             done: false,
+            reader_id: reader_id.to_string(),
+            poll_count: 0,
         }
     }
 
@@ -354,20 +360,46 @@ impl futures::Stream for FlightDataDecoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         if self.done {
+            println!(
+                "flight data decoder - stream done, {}/{}",
+                self.reader_id, self.poll_count
+            );
             return Poll::Ready(None);
         }
+        self.poll_count += 1;
         loop {
+            println!(
+                "flight data decoder polling next, {}/{}",
+                self.reader_id, self.poll_count
+            );
+            let now = Instant::now();
             let res = ready!(self.response.poll_next_unpin(cx));
+            println!(
+                "flight data decoder polled next, {}/{} - took {:?}",
+                self.reader_id,
+                self.poll_count,
+                now.elapsed()
+            );
 
             return Poll::Ready(match res {
                 None => {
                     self.done = true;
+                    println!(
+                        "flight data decoder inner is exhausted, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     None // inner is exhausted
                 }
                 Some(data) => Some(match data {
                     Err(e) => Err(e),
                     Ok(data) => match self.extract_message(data) {
-                        Ok(Some(extracted)) => Ok(extracted),
+                        Ok(Some(extracted)) => {
+                            println!(
+                                "flight data decoder message extracted, {}/{}",
+                                self.reader_id, self.poll_count
+                            );
+                            Ok(extracted)
+                        }
                         Ok(None) => continue, // Need next input message
                         Err(e) => Err(e),
                     },

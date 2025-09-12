@@ -238,7 +238,7 @@ impl FlightDataEncoderBuilder {
     /// of [`FlightData`], consuming self.
     ///
     /// See example on [`Self`] and [`FlightDataEncoder`] for more details
-    pub fn build<S>(self, input: S) -> FlightDataEncoder
+    pub fn build<S>(self, input: S, reader_id: &str) -> FlightDataEncoder
     where
         S: Stream<Item = Result<RecordBatch>> + Send + 'static,
     {
@@ -259,6 +259,7 @@ impl FlightDataEncoderBuilder {
             app_metadata,
             descriptor,
             dictionary_handling,
+            reader_id,
         )
     }
 }
@@ -287,9 +288,14 @@ pub struct FlightDataEncoder {
     /// Deterimines how `DictionaryArray`s are encoded for transport.
     /// See [`DictionaryHandling`] for more information.
     dictionary_handling: DictionaryHandling,
+
+    reader_id: String,
+
+    poll_count: usize,
 }
 
 impl FlightDataEncoder {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         inner: BoxStream<'static, Result<RecordBatch>>,
         schema: Option<SchemaRef>,
@@ -298,6 +304,7 @@ impl FlightDataEncoder {
         app_metadata: Bytes,
         descriptor: Option<FlightDescriptor>,
         dictionary_handling: DictionaryHandling,
+        reader_id: &str,
     ) -> Self {
         let mut encoder = Self {
             inner,
@@ -312,6 +319,8 @@ impl FlightDataEncoder {
             done: false,
             descriptor,
             dictionary_handling,
+            reader_id: reader_id.to_string(),
+            poll_count: 0,
         };
 
         // If schema is known up front, enqueue it immediately
@@ -398,17 +407,38 @@ impl Stream for FlightDataEncoder {
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
         loop {
+            self.poll_count += 1;
+
+            println!(
+                "flight data encoder polling next, {}/{}",
+                self.reader_id, self.poll_count
+            );
             if self.done && self.queue.is_empty() {
+                println!(
+                    "flight data encoder stream done, no more data to send, {}/{}",
+                    self.reader_id, self.poll_count
+                );
                 return Poll::Ready(None);
             }
 
             // Any messages queued to send?
             if let Some(data) = self.queue.pop_front() {
+                println!(
+                    "flight data encoder sending queued message, {}/{}",
+                    self.reader_id, self.poll_count
+                );
                 return Poll::Ready(Some(Ok(data)));
             }
 
             // Get next batch
+            let now = std::time::Instant::now();
             let batch = ready!(self.inner.poll_next_unpin(cx));
+            println!(
+                "flight data encoder polled next, {}/{} - took {:?}",
+                self.reader_id,
+                self.poll_count,
+                now.elapsed()
+            );
 
             match batch {
                 None => {
@@ -416,6 +446,10 @@ impl Stream for FlightDataEncoder {
                     self.done = true;
                     // queue must also be empty so we are done
                     assert!(self.queue.is_empty());
+                    println!(
+                        "flight data encoder stream done, no more data to send, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     return Poll::Ready(None);
                 }
                 Some(Err(e)) => {
@@ -425,6 +459,10 @@ impl Stream for FlightDataEncoder {
                     return Poll::Ready(Some(Err(e)));
                 }
                 Some(Ok(batch)) => {
+                    println!(
+                        "flight data encoder got batch, {}/{}",
+                        self.reader_id, self.poll_count
+                    );
                     // had data, encode into the queue
                     if let Err(e) = self.encode_batch(batch) {
                         self.done = true;
@@ -790,8 +828,8 @@ mod tests {
 
         let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
 
-        let encoder = FlightDataEncoderBuilder::default().build(stream);
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let encoder = FlightDataEncoderBuilder::default().build(stream, "");
+        let mut decoder = FlightDataDecoder::new(encoder, "");
         let expected_schema = Schema::new(vec![Field::new("dict", DataType::Utf8, false)]);
         let expected_schema = Arc::new(expected_schema);
         let mut expected_arrays = vec![
@@ -851,7 +889,7 @@ mod tests {
 
         let encoder = FlightDataEncoderBuilder::default()
             .with_schema(schema)
-            .build(stream);
+            .build(stream, "");
         let expected_schema =
             Arc::new(Schema::new(vec![Field::new("dict", DataType::Utf8, false)]));
         assert_eq!(Some(expected_schema), encoder.known_schema())
@@ -876,7 +914,7 @@ mod tests {
         let encoder = FlightDataEncoderBuilder::default()
             .with_dictionary_handling(DictionaryHandling::Resend)
             .with_schema(schema.clone())
-            .build(stream);
+            .build(stream, "");
         assert_eq!(Some(schema), encoder.known_schema())
     }
 
@@ -929,9 +967,9 @@ mod tests {
 
         let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
 
-        let encoder = FlightDataEncoderBuilder::default().build(stream);
+        let encoder = FlightDataEncoderBuilder::default().build(stream, "");
 
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let mut decoder = FlightDataDecoder::new(encoder, "");
         let expected_schema = Schema::new(vec![Field::new_list(
             "dict_list",
             Field::new("item", DataType::Utf8, true),
@@ -1031,9 +1069,9 @@ mod tests {
 
         let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
 
-        let encoder = FlightDataEncoderBuilder::default().build(stream);
+        let encoder = FlightDataEncoderBuilder::default().build(stream, "");
 
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let mut decoder = FlightDataDecoder::new(encoder, "");
         let expected_schema = Schema::new(vec![Field::new_struct(
             "struct",
             vec![Field::new_list(
@@ -1212,9 +1250,9 @@ mod tests {
 
         let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2), Ok(batch3)]);
 
-        let encoder = FlightDataEncoderBuilder::default().build(stream);
+        let encoder = FlightDataEncoderBuilder::default().build(stream, "");
 
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let mut decoder = FlightDataDecoder::new(encoder, "");
 
         let hydrated_struct_fields = vec![Field::new_list(
             "dict_list",
@@ -1427,9 +1465,9 @@ mod tests {
 
         let stream = futures::stream::iter(vec![Ok(batch1), Ok(batch2)]);
 
-        let encoder = FlightDataEncoderBuilder::default().build(stream);
+        let encoder = FlightDataEncoderBuilder::default().build(stream, "");
 
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let mut decoder = FlightDataDecoder::new(encoder, "");
         let expected_schema = Schema::new(vec![Field::new_map(
             "dict_map",
             "entries",
@@ -1540,11 +1578,14 @@ mod tests {
         let encoder = FlightDataEncoderBuilder::default()
             .with_options(IpcWriteOptions::default().with_preserve_dict_id(false))
             .with_dictionary_handling(DictionaryHandling::Resend)
-            .build(futures::stream::iter(batches.clone().into_iter().map(Ok)));
+            .build(
+                futures::stream::iter(batches.clone().into_iter().map(Ok)),
+                "",
+            );
 
         let mut expected_batches = batches.drain(..);
 
-        let mut decoder = FlightDataDecoder::new(encoder);
+        let mut decoder = FlightDataDecoder::new(encoder, "");
         while let Some(decoded) = decoder.next().await {
             let decoded = decoded.unwrap();
             match decoded.payload {
@@ -1841,7 +1882,7 @@ mod tests {
                 .with_max_flight_data_size(max_flight_data_size)
                 // use 8-byte alignment - default alignment is 64 which produces bigger ipc data
                 .with_options(IpcWriteOptions::try_new(8, false, MetadataVersion::V5).unwrap())
-                .build(futures::stream::iter([Ok(batch.clone())]));
+                .build(futures::stream::iter([Ok(batch.clone())]), "");
 
             let mut i = 0;
             while let Some(data) = stream.next().await.transpose().unwrap() {

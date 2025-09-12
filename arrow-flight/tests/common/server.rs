@@ -410,7 +410,7 @@ impl FlightService for TestFlightServer {
         let batch_stream = futures::stream::iter(batches).map_err(Into::into);
 
         let stream = FlightDataEncoderBuilder::new()
-            .build(batch_stream)
+            .build(batch_stream, "")
             .map_err(Into::into);
 
         let mut resp = Response::new(stream.boxed());

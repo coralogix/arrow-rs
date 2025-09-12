@@ -206,6 +206,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
     ) -> Result<i64, Status> {
         let batches: Vec<RecordBatch> = FlightRecordBatchStream::new_from_flight_data(
             request.into_inner().map_err(|e| e.into()),
+            "",
         )
         .try_collect()
         .await?;

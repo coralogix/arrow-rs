@@ -619,7 +619,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -642,7 +642,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -685,7 +685,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -704,7 +704,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
             .with_schema(schema)
-            .build(futures::stream::once(async { batch }))
+            .build(futures::stream::once(async { batch }), "")
             .map_err(Status::from);
         Ok(Response::new(Box::pin(stream)))
     }
@@ -717,6 +717,7 @@ impl FlightSqlService for FlightSqlServiceImpl {
         // just make sure decoding the parameters works
         let parameters = FlightRecordBatchStream::new_from_flight_data(
             request.into_inner().map_err(|e| e.into()),
+            "",
         )
         .try_collect::<Vec<_>>()
         .await?;

@@ -498,7 +498,7 @@ async fn test_do_exchange() {
         let expected_stream = futures::stream::iter(output_flight_data).map(Ok);
 
         let expected_batches: Vec<_> =
-            FlightRecordBatchStream::new_from_flight_data(expected_stream)
+            FlightRecordBatchStream::new_from_flight_data(expected_stream, "")
                 .try_collect()
                 .await
                 .unwrap();
@@ -1088,7 +1088,7 @@ async fn test_flight_data() -> Vec<FlightData> {
 
     // encode the batch as a stream of FlightData
     FlightDataEncoderBuilder::new()
-        .build(futures::stream::iter(vec![Ok(batch)]))
+        .build(futures::stream::iter(vec![Ok(batch)]), "")
         .try_collect()
         .await
         .unwrap()
@@ -1103,7 +1103,7 @@ async fn test_flight_data2() -> Vec<FlightData> {
 
     // encode the batch as a stream of FlightData
     FlightDataEncoderBuilder::new()
-        .build(futures::stream::iter(vec![Ok(batch)]))
+        .build(futures::stream::iter(vec![Ok(batch)]), "")
         .try_collect()
         .await
         .unwrap()
