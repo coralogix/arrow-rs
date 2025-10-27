@@ -714,6 +714,8 @@ where
             match &mut self.state {
                 StreamState::Decoding(batch_reader) => match batch_reader.next() {
                     Some(Ok(batch)) => {
+                        self.selectivities.truncate(0);
+                        self.selectivities.extend_from_slice(batch_reader.get_selectivities());
                         return Poll::Ready(Some(Ok(batch)));
                     }
                     Some(Err(e)) => {
@@ -750,15 +752,7 @@ where
                         self.reader = Some(reader_factory);
                         match maybe_reader {
                             // Read records from [`ParquetRecordBatchReader`]
-                            Some(reader) => {
-                                if self.selectivities.len() < reader.get_selectivities().len() {
-                                    self.selectivities.resize(reader.get_selectivities().len(), 0);
-                                }
-                                self.selectivities.iter_mut()
-                                    .zip(reader.get_selectivities())
-                                    .for_each(|(acc, cur)| acc += cur);
-                                self.state = StreamState::Decoding(reader)
-                            },
+                            Some(reader) => self.state = StreamState::Decoding(reader),
                             // All rows skipped, read next row group
                             None => self.state = StreamState::Init,
                         }
