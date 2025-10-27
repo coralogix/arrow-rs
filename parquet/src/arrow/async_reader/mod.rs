@@ -670,6 +670,10 @@ pub struct ParquetRecordBatchStream<T> {
     reader: Option<ReaderFactory<T>>,
 
     state: StreamState<T>,
+
+    /// A Vec of length n+1 for how selective each filter was
+    /// https://github.com/apache/arrow-rs/issues/8723
+    pub(crate) selectivities: Vec<usize>,
 }
 
 impl<T> std::fmt::Debug for ParquetRecordBatchStream<T> {
@@ -691,6 +695,11 @@ impl<T> ParquetRecordBatchStream<T> {
     /// [`ParquetRecordBatchStreamBuilder::schema`] if the metadata is desired.
     pub fn schema(&self) -> &SchemaRef {
         &self.schema
+    }
+
+    /// Gets an n+1 slice of the in/out rows for each predicate
+    pub fn get_selectivities(&self) -> &[usize] {
+        self.selectivities.as_slice()
     }
 }
 
@@ -741,7 +750,15 @@ where
                         self.reader = Some(reader_factory);
                         match maybe_reader {
                             // Read records from [`ParquetRecordBatchReader`]
-                            Some(reader) => self.state = StreamState::Decoding(reader),
+                            Some(reader) => {
+                                if self.selectivities.len() < reader.get_selectivities().len() {
+                                    self.selectivities.resize(reader.get_selectivities().len(), 0);
+                                }
+                                self.selectivities.iter_mut()
+                                    .zip(reader.get_selectivities())
+                                    .for_each(|(acc, cur)| acc += cur);
+                                self.state = StreamState::Decoding(reader)
+                            },
                             // All rows skipped, read next row group
                             None => self.state = StreamState::Init,
                         }
