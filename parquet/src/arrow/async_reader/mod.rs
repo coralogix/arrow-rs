@@ -534,7 +534,7 @@ where
             offset_index,
         };
 
-        let pred_cnt = filter.as_ref().map(|f| f.predicates.len()).unwrap_or(0);
+        let pred_cnt = self.filter.as_ref().map(|f| f.predicates.len()).unwrap_or(0);
         let mut selectivities = Vec::<usize>::with_capacity(pred_cnt);
         if let Some(filter) = self.filter.as_mut() {
             for predicate in filter.predicates.iter_mut() {
