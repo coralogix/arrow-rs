@@ -476,6 +476,7 @@ impl<T: AsyncFileReader + Send + 'static> ParquetRecordBatchStreamBuilder<T> {
             schema,
             reader: Some(reader),
             state: StreamState::Init,
+            selectivities: vec![],
         })
     }
 }
@@ -714,8 +715,9 @@ where
             match &mut self.state {
                 StreamState::Decoding(batch_reader) => match batch_reader.next() {
                     Some(Ok(batch)) => {
+                        let selectivities = batch_reader.selectivities.clone();
                         self.selectivities.truncate(0);
-                        self.selectivities.extend_from_slice(batch_reader.get_selectivities());
+                        self.selectivities.extend_from_slice(selectivities);
                         return Poll::Ready(Some(Ok(batch)));
                     }
                     Some(Err(e)) => {
