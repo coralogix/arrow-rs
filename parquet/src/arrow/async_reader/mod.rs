@@ -717,7 +717,7 @@ where
                     Some(Ok(batch)) => {
                         let selectivities = batch_reader.selectivities.clone();
                         self.selectivities.truncate(0);
-                        self.selectivities.extend_from_slice(selectivities);
+                        self.selectivities.extend(selectivities);
                         return Poll::Ready(Some(Ok(batch)));
                     }
                     Some(Err(e)) => {
