@@ -73,8 +73,10 @@ pub struct ArrowReaderBuilder<T> {
 
     pub(crate) offset: Option<usize>,
 
+    #[allow(dead_code)]
     pub(crate) row_id: Option<FieldRef>,
 
+    #[allow(dead_code)]
     pub(crate) prefetch: Option<ProjectionMask>,
 }
 
@@ -617,6 +619,8 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
 
         let mut filter = self.filter;
         let mut selection = self.selection;
+        let pred_cnt = filter.as_ref().map(|f| f.predicates.len()).unwrap_or(0);
+        let mut selectivities = Vec::<usize>::with_capacity(pred_cnt);
 
         if let Some(filter) = filter.as_mut() {
             for predicate in filter.predicates.iter_mut() {
@@ -627,12 +631,14 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
                 let array_reader =
                     build_array_reader(self.fields.as_deref(), predicate.projection(), &reader)?;
 
-                selection = Some(evaluate_predicate(
-                    batch_size,
-                    array_reader,
-                    selection,
-                    predicate.as_mut(),
-                )?);
+                let sel =
+                    evaluate_predicate(batch_size, array_reader, selection, predicate.as_mut())?;
+                if selectivities.is_empty() {
+                    let len = sel.iter().map(|s| s.row_count).sum();
+                    selectivities.push(len);
+                }
+                selectivities.push(sel.row_count());
+                selection = Some(sel);
             }
         }
 
@@ -643,13 +649,15 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
             selection = Some(RowSelection::from(vec![]));
         }
 
-        Ok(ParquetRecordBatchReader::new(
+        let mut me = ParquetRecordBatchReader::new(
             batch_size,
             array_reader,
             apply_range(selection, reader.num_rows(), self.offset, self.limit),
             // TODO what do we do here?
             None,
-        ))
+        );
+        me.selectivities = selectivities;
+        Ok(me)
     }
 }
 
@@ -717,6 +725,7 @@ pub(crate) struct RowId {
 }
 
 impl RowId {
+    #[allow(dead_code)]
     pub fn new(offset: u64, field: FieldRef, batch_size: usize) -> Self {
         Self {
             offset,
@@ -759,6 +768,8 @@ pub struct ParquetRecordBatchReader {
     schema: SchemaRef,
     selection: Option<VecDeque<RowSelector>>,
     row_id: Option<RowId>,
+    /// A Vec of length n+1 for how selective each filter was
+    selectivities: Vec<usize>,
 }
 
 impl Iterator for ParquetRecordBatchReader {
@@ -903,6 +914,7 @@ impl ParquetRecordBatchReader {
             schema: Arc::new(Schema::new(levels.fields.clone())),
             selection: selection.map(|s| s.trim().into()),
             row_id: None,
+            selectivities: vec![],
         })
     }
 
@@ -936,7 +948,13 @@ impl ParquetRecordBatchReader {
             schema: Arc::new(schema),
             selection: selection.map(|s| s.trim().into()),
             row_id: rowid,
+            selectivities: vec![],
         }
+    }
+
+    /// Gets an n+1 slice of the in/out rows for each predicate
+    pub fn get_selectivities(&self) -> &[usize] {
+        self.selectivities.as_slice()
     }
 }
 
@@ -1025,61 +1043,8 @@ pub(crate) fn evaluate_predicate(
 
 /// Maximum number of bytes that can be evaluated in a row filter
 /// before yielding back to the scheduler
+#[allow(dead_code)]
 const DECODE_BUDGET: usize = 2 * 1024 * 1024;
-
-/// Evaluates an [`ArrowPredicate`], returning a [`RowSelection`] indicating
-/// which rows to return.
-///
-/// `input_selection`: Optional pre-existing selection. If `Some`, then the
-/// final [`RowSelection`] will be the conjunction of it and the rows selected
-/// by `predicate`.
-///
-/// Note: A pre-existing selection may come from evaluating a previous predicate
-/// or if the [`ParquetRecordBatchReader`] specified an explicit
-/// [`RowSelection`] in addition to one or more predicates.
-pub(crate) async fn evaluate_predicate_coop(
-    batch_size: usize,
-    array_reader: Box<dyn ArrayReader>,
-    input_selection: Option<RowSelection>,
-    predicate: &mut dyn ArrowPredicate,
-) -> Result<RowSelection> {
-    let mut budget = DECODE_BUDGET;
-
-    let reader =
-        ParquetRecordBatchReader::new(batch_size, array_reader, input_selection.clone(), None);
-    let mut filters = vec![];
-    for maybe_batch in reader {
-        let maybe_batch = maybe_batch?;
-        budget = budget.saturating_sub(maybe_batch.get_array_memory_size());
-
-        let input_rows = maybe_batch.num_rows();
-        let filter = predicate.evaluate(maybe_batch)?;
-        // Since user supplied predicate, check error here to catch bugs quickly
-        if filter.len() != input_rows {
-            return Err(arrow_err!(
-                "ArrowPredicate predicate returned {} rows, expected {input_rows}",
-                filter.len()
-            ));
-        }
-        match filter.null_count() {
-            0 => filters.push(filter),
-            _ => filters.push(prep_null_mask_filter(&filter)),
-        };
-
-        if budget == 0 {
-            // If we have consumed our decode budget, reset the budget and yield
-            // back to the scheduler
-            budget = DECODE_BUDGET;
-            tokio::task::yield_now().await;
-        }
-    }
-
-    let raw = RowSelection::from_filters(&filters);
-    Ok(match input_selection {
-        Some(selection) => selection.and_then(&raw),
-        None => raw,
-    })
-}
 
 #[cfg(test)]
 mod tests {
