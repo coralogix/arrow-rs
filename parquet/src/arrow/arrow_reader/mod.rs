@@ -625,6 +625,7 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
         if let Some(filter) = filter.as_mut() {
             for predicate in filter.predicates.iter_mut() {
                 if !selects_any(selection.as_ref()) {
+                    selectivities.push(0);
                     break;
                 }
 
@@ -649,15 +650,15 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
             selection = Some(RowSelection::from(vec![]));
         }
 
-        let mut me = ParquetRecordBatchReader::new(
+        let mut reader = ParquetRecordBatchReader::new(
             batch_size,
             array_reader,
             apply_range(selection, reader.num_rows(), self.offset, self.limit),
             // TODO what do we do here?
             None,
         );
-        me.selectivities = selectivities;
-        Ok(me)
+        reader.selectivities = selectivities;
+        Ok(reader)
     }
 }
 
@@ -770,7 +771,7 @@ pub struct ParquetRecordBatchReader {
     row_id: Option<RowId>,
     /// A Vec of length n+1 for how selective each filter was
     /// https://github.com/apache/arrow-rs/issues/8723
-    selectivities: Vec<usize>,
+    pub(crate) selectivities: Vec<usize>,
 }
 
 impl Iterator for ParquetRecordBatchReader {

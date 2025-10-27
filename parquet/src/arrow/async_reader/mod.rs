@@ -534,6 +534,8 @@ where
             offset_index,
         };
 
+        let pred_cnt = filter.as_ref().map(|f| f.predicates.len()).unwrap_or(0);
+        let mut selectivities = Vec::<usize>::with_capacity(pred_cnt);
         if let Some(filter) = self.filter.as_mut() {
             for predicate in filter.predicates.iter_mut() {
                 if !selects_any(selection.as_ref()) {
@@ -553,15 +555,20 @@ where
                 let array_reader =
                     build_array_reader(self.fields.as_deref(), predicate_projection, &row_group)?;
 
-                selection = Some(
-                    evaluate_predicate_coop(
-                        batch_size,
-                        array_reader,
-                        selection,
-                        predicate.as_mut(),
-                    )
-                    .await?,
-                );
+                let sel = evaluate_predicate_coop(
+                    batch_size,
+                    array_reader,
+                    selection,
+                    predicate.as_mut(),
+                ).await?;
+
+                if selectivities.is_empty() {
+                    let len = sel.iter().map(|s| s.row_count).sum();
+                    selectivities.push(len);
+                }
+                selectivities.push(sel.row_count());
+
+                selection = Some(sel);
             }
         }
 
@@ -610,12 +617,13 @@ where
             RowId::new(offset, field, batch_size)
         });
 
-        let reader = ParquetRecordBatchReader::new(
+        let mut reader = ParquetRecordBatchReader::new(
             batch_size,
             build_array_reader(self.fields.as_deref(), &projection, &row_group)?,
             selection,
             rowid,
         );
+        reader.selectivities = selectivities;
 
         Ok((self, Some(reader)))
     }
