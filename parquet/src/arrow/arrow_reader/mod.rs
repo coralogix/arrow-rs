@@ -769,6 +769,7 @@ pub struct ParquetRecordBatchReader {
     selection: Option<VecDeque<RowSelector>>,
     row_id: Option<RowId>,
     /// A Vec of length n+1 for how selective each filter was
+    /// https://github.com/apache/arrow-rs/issues/8723
     selectivities: Vec<usize>,
 }
 
