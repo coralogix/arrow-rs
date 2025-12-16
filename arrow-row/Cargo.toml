@@ -41,7 +41,7 @@ arrow-buffer = { workspace = true }
 arrow-data = { workspace = true }
 arrow-schema = { workspace = true }
 
-half = { version = "2.1", default-features = false }
+half = { version = "=2.1.0", default-features = false }
 
 [dev-dependencies]
 arrow-cast = { workspace = true }
