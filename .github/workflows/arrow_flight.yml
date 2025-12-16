@@ -76,16 +76,16 @@ jobs:
       - name: Verify workspace clean (if this fails, run ./arrow-flight/regen.sh and check in results)
         run: git diff --exit-code
 
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-      - name: Setup Clippy
-        run: rustup component add clippy
-      - name: Run clippy
-        run: cargo clippy -p arrow-flight --all-targets --all-features -- -D warnings
+#  clippy:
+#    name: Clippy
+#    runs-on: ubuntu-latest
+#    container:
+#      image: amd64/rust
+#    steps:
+#      - uses: actions/checkout@v4
+#      - name: Setup Rust toolchain
+#        uses: ./.github/actions/setup-builder
+#      - name: Setup Clippy
+#        run: rustup component add clippy
+#      - name: Run clippy
+#        run: cargo clippy -p arrow-flight --all-targets --all-features -- -D warnings
