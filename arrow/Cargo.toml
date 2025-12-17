@@ -55,7 +55,7 @@ arrow-string = { workspace = true }
 
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"], optional = true }
 pyo3 = { version = "0.23", default-features = false, optional = true }
-half = { version = "=2.1.0", default-features = false, optional = true }
+half = { version = ">=2.1.0, <=2.7.1", default-features = false, optional = true }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -85,7 +85,7 @@ canonical_extension_types = ["arrow-schema/canonical_extension_types"]
 [dev-dependencies]
 chrono = { workspace = true }
 criterion = { version = "0.5", default-features = false }
-half = { version = "=2.1.0", default-features = false }
+half = { version = ">=2.1.0, <=2.7.1", default-features = false }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 # used in examples
