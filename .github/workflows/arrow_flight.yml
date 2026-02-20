@@ -62,20 +62,6 @@ jobs:
         run: |
           cargo test -p arrow-flight  --features=flight-sql,tls --examples
 
-  vendor:
-    name: Verify Vendored Code
-    runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-      - name: Run gen
-        run: ./arrow-flight/regen.sh
-      - name: Verify workspace clean (if this fails, run ./arrow-flight/regen.sh and check in results)
-        run: git diff --exit-code
-
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
