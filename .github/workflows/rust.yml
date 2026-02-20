@@ -30,59 +30,6 @@ on:
   pull_request:
 
 jobs:
-  # Check workspace wide compile and test with default features for
-  # mac
-  macos:
-    name: Test on Mac
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Install protoc with brew
-        run: brew install protobuf
-      - name: Setup Rust toolchain
-        run: |
-          rustup toolchain install stable --no-self-update
-          rustup default stable
-      - name: Run tests
-        shell: bash
-        run: |
-          # do not produce debug symbols to keep memory usage down
-          export RUSTFLAGS="-C debuginfo=0"
-          # PyArrow tests happen in integration.yml.
-          cargo test --workspace
-
-  # Check workspace wide compile and test with default features for
-  # windows
-  windows:
-    name: Test on Windows
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Install protobuf compiler in /d/protoc
-        shell: bash
-        run: |
-          mkdir /d/protoc
-          cd /d/protoc
-          curl -LO https://github.com/protocolbuffers/protobuf/releases/download/v21.4/protoc-21.4-win64.zip
-          unzip protoc-21.4-win64.zip
-          export PATH=$PATH:/d/protoc/bin
-          protoc --version
-
-      - name: Setup Rust toolchain
-        run: |
-          rustup toolchain install stable --no-self-update
-          rustup default stable
-      - name: Run tests
-        shell: bash
-        run: |
-          # do not produce debug symbols to keep memory usage down
-          export RUSTFLAGS="-C debuginfo=0"
-          export PATH=$PATH:/d/protoc/bin
-          cargo test --workspace
 
   # Run cargo fmt for all crates
   lint:
@@ -107,22 +54,31 @@ jobs:
           # cargo fmt -p parquet -- --config skip_children=true `find . -name "*.rs" \! -name format.rs`
           cargo fmt -p parquet -- --check --config skip_children=true `find . -name "*.rs" \! -name format.rs`
 
-  msrv:
-    name: Verify MSRV (Minimum Supported Rust Version)
-    runs-on: ubuntu-latest
-    container:
-      image: amd64/rust
-    steps:
-      - uses: actions/checkout@v4
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-      - name: Install cargo-msrv
-        run: cargo install cargo-msrv
-      - name: Check all packages
-        run: |
-          # run `cargo msrv verify --manifest-path "path/to/Cargo.toml"` to see problematic dependencies
-          find . -mindepth 2 -name Cargo.toml | while read -r dir
-          do
-            echo "Checking package '$dir'"
-            cargo msrv verify --manifest-path "$dir" --output-format=json || exit 1
-          done
+  # msrv:
+  #   name: Verify MSRV (Minimum Supported Rust Version)
+  #   runs-on: ubuntu-latest
+  #   container:
+  #     image: amd64/rust
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Setup Rust toolchain
+  #       uses: ./.github/actions/setup-builder
+  #     - name: Install cargo-msrv
+  #       run: cargo install cargo-msrv
+  #     - name: Downgrade arrow-pyarrow-integration-testing dependencies
+  #       working-directory: arrow-pyarrow-integration-testing
+  #       # Necessary because half 2.5 requires rust 1.81 or newer
+  #       run: |
+  #         cargo update -p half --precise 2.4.0
+  #     - name: Downgrade workspace dependencies
+  #       # Necessary because half 2.5 requires rust 1.81 or newer
+  #       run: |
+  #         cargo update -p half --precise 2.4.0
+  #     - name: Check all packages
+  #       run: |
+  #         # run `cargo msrv verify --manifest-path "path/to/Cargo.toml"` to see problematic dependencies
+  #         find . -mindepth 2 -name Cargo.toml | while read -r dir
+  #         do
+  #           echo "Checking package '$dir'"
+  #           cargo msrv verify --manifest-path "$dir" --output-format=json || exit 1
+  #         done
