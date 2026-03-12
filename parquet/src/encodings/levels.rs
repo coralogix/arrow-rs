@@ -108,6 +108,27 @@ impl LevelEncoder {
         num_encoded
     }
 
+    /// Put/encode levels vector into this level encoder.
+    /// Returns number of encoded values that are less than or equal to length of the
+    /// input buffer.
+    #[inline]
+    pub fn put_bulk(&mut self, runs: &[(i16, usize)]) -> usize {
+        let mut num_encoded = 0;
+        match *self {
+            LevelEncoder::Rle(ref mut encoder) | LevelEncoder::RleV2(ref mut encoder) => {
+                for &(value, count) in runs {
+                    encoder.put_bulk(value as u64, count);
+                    num_encoded += count;
+                }
+                encoder.flush();
+            }
+            LevelEncoder::BitPacked(_, _) => {
+                unimplemented!()
+            }
+        }
+        num_encoded
+    }
+
     /// Finalizes level encoder, flush all intermediate buffers and return resulting
     /// encoded buffer. Returned buffer is already truncated to encoded bytes only.
     #[inline]
