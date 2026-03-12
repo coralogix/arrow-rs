@@ -151,6 +151,96 @@ impl RleEncoder {
         }
     }
 
+    /// Encode a single value repeated `count` times.
+    #[inline]
+    pub fn put_bulk(&mut self, value: u64, count: usize) {
+        assert!(count > 0, "Count must be positive");
+        let remaining = 8 - self.num_buffered_values;
+        if self.current_value == value {
+            if self.repeat_count >= 8 {
+                self.repeat_count += count;
+                return;
+            }
+            let n = remaining.min(count);
+            for _ in 0..n {
+                self.buffered_values[self.num_buffered_values] = value;
+                self.num_buffered_values += 1;
+                self.repeat_count += 1;
+            }
+            if self.num_buffered_values == 8 {
+                assert_eq!(self.bit_packed_count % 8, 0);
+                self.flush_buffered_values();
+                if count > n {
+                    let mut remaining_run = count - n;
+                    // Fill buffer
+                    for _ in 0..remaining_run.min(8) {
+                        self.repeat_count += 1;
+                        remaining_run -= 1;
+                        if self.repeat_count > 8 {
+                            break;
+                        }
+                        self.buffered_values[self.num_buffered_values] = value;
+                        self.num_buffered_values += 1;
+                    }
+                    if self.num_buffered_values == 8 && self.repeat_count <= 8 {
+                        // Buffered values are full. Flush them.
+                        assert_eq!(self.bit_packed_count % 8, 0);
+                        self.flush_buffered_values();
+                    }
+
+                    self.repeat_count += remaining_run;
+                }
+            }
+        } else {
+            if self.repeat_count >= 8 {
+                // The current RLE run has ended and we've gathered enough. Flush first.
+                assert_eq!(
+                    self.bit_packed_count, 0,
+                    "rc = {}, value = {}, num_buffered = {}, c = {count}, {:?}",
+                    self.repeat_count, value, self.num_buffered_values, self.buffered_values
+                );
+                self.flush_rle_run();
+            }
+            self.current_value = value;
+            let n = remaining.min(count);
+            self.repeat_count = 0;
+            for _ in 0..n {
+                self.buffered_values[self.num_buffered_values] = value;
+                self.num_buffered_values += 1;
+                self.repeat_count += 1;
+            }
+            if self.num_buffered_values == 8 {
+                let mut new_count = count;
+                if self.repeat_count < 8 {
+                    new_count = count - self.repeat_count;
+                }
+                // Buffered values are full. Flush them.
+                assert_eq!(self.bit_packed_count % 8, 0);
+                self.flush_buffered_values();
+                if count > n {
+                    if self.repeat_count <= 8 {
+                        for _ in 0..(count - n).min(8) {
+                            self.repeat_count += 1;
+                            if self.repeat_count > 8 {
+                                break;
+                            }
+                            self.buffered_values[self.num_buffered_values] = value;
+                            self.num_buffered_values += 1;
+                        }
+                        if self.num_buffered_values == 8 && self.repeat_count <= 8 {
+                            // Buffered values are full. Flush them.
+                            assert_eq!(self.bit_packed_count % 8, 0);
+                            self.flush_buffered_values();
+                        }
+                    }
+                    self.repeat_count = new_count;
+                }
+            } else if count > 8 {
+                self.repeat_count = count;
+            }
+        }
+    }
+
     #[inline]
     #[allow(unused)]
     pub fn buffer(&self) -> &[u8] {
