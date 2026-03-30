@@ -793,13 +793,17 @@ impl<'a> MutableArrayData<'a> {
             _ => data.child_data.into_iter().map(|x| x.freeze()).collect(),
         };
 
-        let nulls = data
-            .null_buffer
-            .map(|nulls| {
-                let bools = BooleanBuffer::new(nulls.into(), 0, data.len);
-                unsafe { NullBuffer::new_unchecked(bools, data.null_count) }
-            })
-            .filter(|n| n.null_count() > 0);
+        let nulls = match data.data_type {
+            // RunEndEncoded, Null, and Union arrays cannot have top-level null bitmasks
+            DataType::RunEndEncoded(_, _) | DataType::Null | DataType::Union(_, _) => None,
+            _ => data
+                .null_buffer
+                .map(|nulls| {
+                    let bools = BooleanBuffer::new(nulls.into(), 0, data.len);
+                    unsafe { NullBuffer::new_unchecked(bools, data.null_count) }
+                })
+                .filter(|n| n.null_count() > 0),
+        };
 
         ArrayDataBuilder::new(data.data_type)
             .offset(0)
