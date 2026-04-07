@@ -27,6 +27,11 @@ use arrow_array::Array;
 use arrow_select::filter::prep_null_mask_filter;
 use std::collections::VecDeque;
 
+/// Maximum number of bytes that can be decoded during predicate evaluation
+/// before yielding back to the async scheduler (fork-only)
+#[cfg(feature = "async")]
+const DECODE_BUDGET: usize = 2 * 1024 * 1024;
+
 /// A builder for [`ReadPlan`]
 #[derive(Clone)]
 pub struct ReadPlanBuilder {
@@ -112,6 +117,50 @@ impl ReadPlanBuilder {
                 0 => filters.push(filter),
                 _ => filters.push(prep_null_mask_filter(&filter)),
             };
+        }
+
+        let raw = RowSelection::from_filters(&filters);
+        self.selection = match self.selection.take() {
+            Some(selection) => Some(selection.and_then(&raw)),
+            None => Some(raw),
+        };
+        Ok(self)
+    }
+
+    /// Async version of [`Self::with_predicate`] that cooperatively yields
+    /// back to the async scheduler after decoding [`DECODE_BUDGET`] bytes,
+    /// preventing long predicate evaluations from blocking the runtime.
+    #[cfg(feature = "async")]
+    pub(crate) async fn with_predicate_coop(
+        mut self,
+        array_reader: Box<dyn ArrayReader>,
+        predicate: &mut dyn ArrowPredicate,
+    ) -> Result<Self> {
+        let reader = ParquetRecordBatchReader::new(array_reader, self.clone().build());
+        let mut filters = vec![];
+        let mut budget = DECODE_BUDGET;
+        for maybe_batch in reader {
+            let maybe_batch = maybe_batch?;
+            budget = budget.saturating_sub(maybe_batch.get_array_memory_size());
+
+            let input_rows = maybe_batch.num_rows();
+            let filter = predicate.evaluate(maybe_batch)?;
+            // Since user supplied predicate, check error here to catch bugs quickly
+            if filter.len() != input_rows {
+                return Err(arrow_err!(
+                    "ArrowPredicate predicate returned {} rows, expected {input_rows}",
+                    filter.len()
+                ));
+            }
+            match filter.null_count() {
+                0 => filters.push(filter),
+                _ => filters.push(prep_null_mask_filter(&filter)),
+            };
+
+            if budget == 0 {
+                budget = DECODE_BUDGET;
+                tokio::task::yield_now().await;
+            }
         }
 
         let raw = RowSelection::from_filters(&filters);
