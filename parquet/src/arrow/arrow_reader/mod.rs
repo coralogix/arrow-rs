@@ -17,10 +17,11 @@
 
 //! Contains reader which reads parquet data into arrow [`RecordBatch`]
 
+use arrow_array::builder::UInt64Builder;
 use arrow_array::cast::AsArray;
-use arrow_array::Array;
+use arrow_array::{Array, ArrayRef};
 use arrow_array::{RecordBatch, RecordBatchReader};
-use arrow_schema::{ArrowError, DataType as ArrowType, Schema, SchemaRef};
+use arrow_schema::{ArrowError, DataType as ArrowType, Field, FieldRef, Schema, SchemaRef};
 pub use filter::{ArrowPredicate, ArrowPredicateFn, RowFilter};
 pub use selection::{RowSelection, RowSelector};
 use std::fmt::{Debug, Formatter};
@@ -112,6 +113,9 @@ pub struct ArrowReaderBuilder<T> {
     pub(crate) limit: Option<usize>,
 
     pub(crate) offset: Option<usize>,
+
+    #[allow(unused)]
+    pub(crate) row_id: Option<FieldRef>,
 }
 
 impl<T: Debug> Debug for ArrowReaderBuilder<T> {
@@ -146,6 +150,7 @@ impl<T> ArrowReaderBuilder<T> {
             selection: None,
             limit: None,
             offset: None,
+            row_id: None,
         }
     }
 
@@ -170,6 +175,15 @@ impl<T> ArrowReaderBuilder<T> {
         // Try to avoid allocate large buffer
         let batch_size = batch_size.min(self.metadata.file_metadata().num_rows() as usize);
         Self { batch_size, ..self }
+    }
+
+    /// Project a column into the result with name `field_name` that will contain the row ID
+    /// for each row. The row ID will be the row offset of the row in the underlying file
+    pub fn with_row_id(self, field_name: impl Into<String>) -> Self {
+        Self {
+            row_id: Some(RowId::field_ref(field_name)),
+            ..self
+        }
     }
 
     /// Only read data from the provided row group indexes
@@ -750,7 +764,8 @@ impl<T: ChunkReader + 'static> ParquetRecordBatchReaderBuilder<T> {
             .build_limited()
             .build();
 
-        Ok(ParquetRecordBatchReader::new(array_reader, read_plan))
+        // TODO what do we do here?
+        Ok(ParquetRecordBatchReader::new(array_reader, read_plan, None))
     }
 }
 
@@ -826,12 +841,55 @@ impl<T: ChunkReader + 'static> Iterator for ReaderPageIterator<T> {
 
 impl<T: ChunkReader + 'static> PageIterator for ReaderPageIterator<T> {}
 
+pub(crate) struct RowId {
+    offset: u64,
+    field: FieldRef,
+    buffer: UInt64Builder,
+}
+
+impl RowId {
+    #[allow(unused)]
+    pub fn new(offset: u64, field: FieldRef, batch_size: usize) -> Self {
+        Self {
+            offset,
+            field,
+            buffer: UInt64Builder::with_capacity(batch_size),
+        }
+    }
+
+    pub fn field_ref(name: impl Into<String>) -> FieldRef {
+        Arc::new(Field::new(name, ArrowType::UInt64, false))
+    }
+
+    pub fn skip(&mut self, n: usize) {
+        self.offset += n as u64;
+    }
+
+    pub fn field(&self) -> FieldRef {
+        self.field.clone()
+    }
+
+    fn read(&mut self, n: usize) {
+        // SAFETY: We are appending a `Range<u64>` which has a trusted length
+        unsafe {
+            self.buffer
+                .append_trusted_len_iter(self.offset..self.offset + n as u64)
+        }
+        self.offset += n as u64;
+    }
+
+    fn consume(&mut self) -> ArrayRef {
+        Arc::new(self.buffer.finish())
+    }
+}
+
 /// An `Iterator<Item = ArrowResult<RecordBatch>>` that yields [`RecordBatch`]
 /// read from a parquet data source
 pub struct ParquetRecordBatchReader {
     array_reader: Box<dyn ArrayReader>,
     schema: SchemaRef,
     read_plan: ReadPlan,
+    row_id: Option<RowId>,
 }
 
 impl Iterator for ParquetRecordBatchReader {
@@ -859,6 +917,10 @@ impl ParquetRecordBatchReader {
                     let front = selection.pop_front().unwrap();
                     if front.skip {
                         let skipped = self.array_reader.skip_records(front.row_count)?;
+
+                        if let Some(row_id) = self.row_id.as_mut() {
+                            row_id.skip(skipped);
+                        }
 
                         if skipped != front.row_count {
                             return Err(general_err!(
@@ -889,13 +951,23 @@ impl ParquetRecordBatchReader {
                     };
                     match self.array_reader.read_records(to_read)? {
                         0 => break,
-                        rec => read_records += rec,
+                        rec => {
+                            if let Some(rowid) = self.row_id.as_mut() {
+                                rowid.read(rec);
+                            }
+                            read_records += rec
+                        }
                     };
                 }
             }
-            None => {
-                self.array_reader.read_records(batch_size)?;
-            }
+            None => match self.array_reader.read_records(batch_size) {
+                Ok(n) => {
+                    if let Some(rowid) = self.row_id.as_mut() {
+                        rowid.read(n);
+                    }
+                }
+                Err(error) => return Err(error),
+            },
         };
 
         let array = self.array_reader.consume_batch()?;
@@ -904,7 +976,16 @@ impl ParquetRecordBatchReader {
         })?;
 
         Ok(if struct_array.len() > 0 {
-            Some(RecordBatch::from(struct_array))
+            Some(match self.row_id.as_mut() {
+                Some(rowid) => {
+                    let columns = std::iter::once(rowid.consume())
+                        .chain(struct_array.columns().iter().cloned())
+                        .collect();
+
+                    RecordBatch::try_new(self.schema.clone(), columns).expect("invalid schema")
+                }
+                None => RecordBatch::from(struct_array),
+            })
         } else {
             None
         })
@@ -952,22 +1033,38 @@ impl ParquetRecordBatchReader {
             array_reader,
             schema: Arc::new(Schema::new(levels.fields.clone())),
             read_plan,
+            row_id: None,
         })
     }
 
     /// Create a new [`ParquetRecordBatchReader`] that will read at most `batch_size` rows at
     /// a time from [`ArrayReader`] based on the configured `selection`. If `selection` is `None`
     /// all rows will be returned
-    pub(crate) fn new(array_reader: Box<dyn ArrayReader>, read_plan: ReadPlan) -> Self {
-        let schema = match array_reader.get_data_type() {
-            ArrowType::Struct(ref fields) => Schema::new(fields.clone()),
+    pub(crate) fn new(
+        array_reader: Box<dyn ArrayReader>,
+        read_plan: ReadPlan,
+        rowid: Option<RowId>,
+    ) -> Self {
+        let struct_fields = match array_reader.get_data_type() {
+            ArrowType::Struct(ref fields) => fields.clone(),
             _ => unreachable!("Struct array reader's data type is not struct!"),
+        };
+
+        let schema = match rowid.as_ref() {
+            Some(rowid) => {
+                let fields: Vec<_> = std::iter::once(rowid.field())
+                    .chain(struct_fields.iter().cloned())
+                    .collect();
+                Schema::new(fields)
+            }
+            None => Schema::new(struct_fields),
         };
 
         Self {
             array_reader,
             schema: Arc::new(schema),
             read_plan,
+            row_id: rowid,
         }
     }
 
