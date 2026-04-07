@@ -100,7 +100,7 @@ impl ReadPlanBuilder {
         array_reader: Box<dyn ArrayReader>,
         predicate: &mut dyn ArrowPredicate,
     ) -> Result<Self> {
-        let reader = ParquetRecordBatchReader::new(array_reader, self.clone().build());
+        let reader = ParquetRecordBatchReader::new(array_reader, self.clone().build(), None);
         let mut filters = vec![];
         for maybe_batch in reader {
             let maybe_batch = maybe_batch?;
@@ -136,7 +136,7 @@ impl ReadPlanBuilder {
         array_reader: Box<dyn ArrayReader>,
         predicate: &mut dyn ArrowPredicate,
     ) -> Result<Self> {
-        let reader = ParquetRecordBatchReader::new(array_reader, self.clone().build());
+        let reader = ParquetRecordBatchReader::new(array_reader, self.clone().build(), None);
         let mut filters = vec![];
         let mut budget = DECODE_BUDGET;
         for maybe_batch in reader {
