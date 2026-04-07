@@ -616,7 +616,9 @@ where
                 let array_reader = ArrayReaderBuilder::new(&row_group)
                     .build_array_reader(self.fields.as_deref(), predicate.projection())?;
 
-                plan_builder = plan_builder.with_predicate(array_reader, predicate.as_mut())?;
+                plan_builder = plan_builder
+                    .with_predicate_coop(array_reader, predicate.as_mut())
+                    .await?;
             }
         }
 
