@@ -63,7 +63,24 @@ impl InMemoryRowGroup<'_> {
         cache_mask: Option<&ProjectionMask>,
     ) -> FetchRanges {
         let metadata = self.metadata.row_group(self.row_group_idx);
-        if let Some((selection, offset_index)) = selection.zip(self.offset_index) {
+        // A sparse (page-level) fetch can only locate a column's data pages when
+        // the offset index actually carries page locations for it. If any column
+        // we still need to fetch is missing its page locations we cannot build a
+        // valid sparse chunk for it: `scan_ranges` would return no ranges, the
+        // column would be fetched empty, and the later read would fail with
+        // "Invalid offset in sparse column chunk data: <n>, no matching page
+        // found". In that case fall back to fetching whole column chunks (dense).
+        let sparse_fetch_possible = |offset_index: &[OffsetIndexMetaData]| {
+            self.column_chunks.iter().enumerate().all(|(idx, chunk)| {
+                chunk.is_some()
+                    || !projection.leaf_included(idx)
+                    || !offset_index[idx].page_locations.is_empty()
+            })
+        };
+        if let Some((selection, offset_index)) = selection
+            .zip(self.offset_index)
+            .filter(|(_, offset_index)| sparse_fetch_possible(offset_index))
+        {
             let expanded_selection =
                 selection.expand_to_batch_boundaries(batch_size, self.row_count);
 
@@ -315,3 +332,152 @@ impl Iterator for ColumnChunkIterator {
 }
 
 impl PageIterator for ColumnChunkIterator {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arrow::arrow_reader::{RowSelection, RowSelector};
+    use crate::basic::Type as PhysicalType;
+    use crate::file::metadata::{
+        ColumnChunkMetaData, FileMetaData, ParquetMetaDataBuilder, RowGroupMetaData,
+    };
+    use crate::file::page_index::offset_index::PageLocation;
+    use crate::schema::types::{SchemaDescriptor, Type};
+
+    /// Metadata for a single row group with two INT32 column chunks occupying
+    /// `[4, 104)` and `[200, 300)` in the file.
+    fn two_column_metadata() -> (ParquetMetaData, Arc<SchemaDescriptor>) {
+        let a = Arc::new(
+            Type::primitive_type_builder("a", PhysicalType::INT32)
+                .build()
+                .unwrap(),
+        );
+        let b = Arc::new(
+            Type::primitive_type_builder("b", PhysicalType::INT32)
+                .build()
+                .unwrap(),
+        );
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(vec![a, b])
+                .build()
+                .unwrap(),
+        );
+        let schema_descr = Arc::new(SchemaDescriptor::new(schema));
+
+        let col0 = ColumnChunkMetaData::builder(schema_descr.column(0))
+            .set_total_compressed_size(100)
+            .set_data_page_offset(4)
+            .build()
+            .unwrap();
+        let col1 = ColumnChunkMetaData::builder(schema_descr.column(1))
+            .set_total_compressed_size(100)
+            .set_data_page_offset(200)
+            .build()
+            .unwrap();
+
+        let row_group = RowGroupMetaData::builder(schema_descr.clone())
+            .set_num_rows(10)
+            .set_total_byte_size(300)
+            .set_column_metadata(vec![col0, col1])
+            .build()
+            .unwrap();
+
+        let file_meta = FileMetaData::new(1, 10, None, None, schema_descr.clone(), None);
+        let metadata = ParquetMetaDataBuilder::new(file_meta)
+            .set_row_groups(vec![row_group])
+            .build();
+        (metadata, schema_descr)
+    }
+
+    fn page_locations() -> OffsetIndexMetaData {
+        OffsetIndexMetaData {
+            page_locations: vec![
+                PageLocation {
+                    offset: 4,
+                    compressed_page_size: 50,
+                    first_row_index: 0,
+                },
+                PageLocation {
+                    offset: 54,
+                    compressed_page_size: 50,
+                    first_row_index: 5,
+                },
+            ],
+            unencoded_byte_array_data_bytes: None,
+        }
+    }
+
+    fn empty_locations() -> OffsetIndexMetaData {
+        OffsetIndexMetaData {
+            page_locations: vec![],
+            unencoded_byte_array_data_bytes: None,
+        }
+    }
+
+    fn selection() -> RowSelection {
+        RowSelection::from(vec![RowSelector::skip(3), RowSelector::select(4)])
+    }
+
+    #[test]
+    fn sparse_fetch_when_every_projected_column_has_page_locations() {
+        let (metadata, _schema) = two_column_metadata();
+        let offset_index = vec![page_locations(), page_locations()];
+        let row_group = InMemoryRowGroup {
+            offset_index: Some(&offset_index),
+            column_chunks: vec![None, None],
+            row_count: 10,
+            row_group_idx: 0,
+            metadata: &metadata,
+        };
+        let fetch = row_group.fetch_ranges(&ProjectionMask::all(), Some(&selection()), 8, None);
+        assert!(
+            fetch.page_start_offsets.is_some(),
+            "a complete offset index should drive a sparse (page-level) fetch"
+        );
+    }
+
+    #[test]
+    fn dense_fallback_when_a_projected_column_lacks_page_locations() {
+        let (metadata, _schema) = two_column_metadata();
+        // Column 1 has no page locations, e.g. metadata synthesized from a
+        // manifest that is missing its page index. Previously this made the
+        // sparse fetch read an empty column chunk and later fail with "Invalid
+        // offset in sparse column chunk data: <n>, no matching page found".
+        let offset_index = vec![page_locations(), empty_locations()];
+        let row_group = InMemoryRowGroup {
+            offset_index: Some(&offset_index),
+            column_chunks: vec![None, None],
+            row_count: 10,
+            row_group_idx: 0,
+            metadata: &metadata,
+        };
+        let fetch = row_group.fetch_ranges(&ProjectionMask::all(), Some(&selection()), 8, None);
+        assert!(
+            fetch.page_start_offsets.is_none(),
+            "a projected column without page locations must fall back to a dense fetch"
+        );
+        // A dense fetch reads each projected column's full byte range.
+        assert_eq!(fetch.ranges, vec![4..104, 200..300]);
+    }
+
+    #[test]
+    fn sparse_fetch_when_column_without_page_locations_is_not_projected() {
+        let (metadata, schema) = two_column_metadata();
+        let offset_index = vec![page_locations(), empty_locations()];
+        let row_group = InMemoryRowGroup {
+            offset_index: Some(&offset_index),
+            column_chunks: vec![None, None],
+            row_count: 10,
+            row_group_idx: 0,
+            metadata: &metadata,
+        };
+        // Only column 0, which has page locations, is projected.
+        let projection = ProjectionMask::leaves(schema.as_ref(), [0]);
+        let fetch = row_group.fetch_ranges(&projection, Some(&selection()), 8, None);
+        assert!(
+            fetch.page_start_offsets.is_some(),
+            "a missing index on an unprojected column should not disable sparse fetches"
+        );
+    }
+}
