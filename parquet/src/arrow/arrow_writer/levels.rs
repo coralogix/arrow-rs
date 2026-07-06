@@ -619,6 +619,9 @@ pub(crate) struct ArrayLevels {
 
     /// cached logical nulls of the array.
     logical_nulls: Option<NullBuffer>,
+
+    #[allow(dead_code)]
+    def_levels_runs: Option<Vec<(i16, usize)>>,
 }
 
 impl PartialEq for ArrayLevels {
@@ -652,6 +655,7 @@ impl ArrayLevels {
             max_rep_level,
             array,
             logical_nulls,
+            def_levels_runs: (max_def_level != 0).then(Vec::new),
         }
     }
 
@@ -726,6 +730,7 @@ mod tests {
             max_rep_level: 2,
             array: Arc::new(primitives),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected);
     }
@@ -747,6 +752,7 @@ mod tests {
             max_rep_level: 0,
             array,
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -775,6 +781,7 @@ mod tests {
             max_rep_level: 0,
             array,
             logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -810,6 +817,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(leaf_array),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -844,6 +852,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(leaf_array),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -894,6 +903,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(leaf),
             logical_nulls: None,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_levels);
@@ -945,6 +955,7 @@ mod tests {
             max_rep_level: 2,
             array: Arc::new(leaf),
             logical_nulls: None,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_levels);
@@ -983,6 +994,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(leaf),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -1016,6 +1028,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(leaf),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
 
@@ -1065,6 +1078,7 @@ mod tests {
             max_rep_level: 2,
             array: Arc::new(leaf),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -1106,6 +1120,7 @@ mod tests {
             max_rep_level: 0,
             array: leaf,
             logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(&levels[0], &expected_levels);
     }
@@ -1146,6 +1161,7 @@ mod tests {
             max_rep_level: 1,
             array: Arc::new(a_values),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1239,6 +1255,7 @@ mod tests {
             max_rep_level: 0,
             array: Arc::new(a),
             logical_nulls: None,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1254,6 +1271,7 @@ mod tests {
             max_rep_level: 0,
             array: Arc::new(b),
             logical_nulls: b_logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1269,6 +1287,7 @@ mod tests {
             max_rep_level: 0,
             array: Arc::new(d),
             logical_nulls: d_logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1284,6 +1303,7 @@ mod tests {
             max_rep_level: 0,
             array: Arc::new(f),
             logical_nulls: f_logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1392,6 +1412,7 @@ mod tests {
             max_rep_level: 1,
             array: map.keys().clone(),
             logical_nulls: map_keys_logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
 
@@ -1407,6 +1428,7 @@ mod tests {
             max_rep_level: 1,
             array: map.values().clone(),
             logical_nulls: map_values_logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1494,6 +1516,7 @@ mod tests {
             max_rep_level: 1,
             array: values,
             logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(list_level, &expected_level);
@@ -1536,6 +1559,7 @@ mod tests {
             max_rep_level: 1,
             array: values,
             logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_level);
@@ -1623,6 +1647,7 @@ mod tests {
             max_rep_level: 2,
             array: a1_values,
             logical_nulls: a1_logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[0], &expected_level);
@@ -1636,6 +1661,7 @@ mod tests {
             max_rep_level: 1,
             array: a2_values,
             logical_nulls: a2_logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(&levels[1], &expected_level);
@@ -1676,6 +1702,7 @@ mod tests {
             max_rep_level: 1,
             array: values,
             logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1828,6 +1855,7 @@ mod tests {
             max_rep_level: 1,
             array: values_a,
             logical_nulls: values_a_logical_nulls,
+            def_levels_runs: None,
         };
         // [[{b: 2}, null], null, [null, null], [{b: 3}, {b: 4}]]
         let values_b_logical_nulls = values_b.logical_nulls();
@@ -1839,6 +1867,7 @@ mod tests {
             max_rep_level: 1,
             array: values_b,
             logical_nulls: values_b_logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(a_levels, &expected_a);
@@ -1872,6 +1901,7 @@ mod tests {
             max_rep_level: 1,
             array: values,
             logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(list_level, &expected_level);
     }
@@ -1909,6 +1939,7 @@ mod tests {
             max_rep_level: 2,
             array: values,
             logical_nulls,
+            def_levels_runs: None,
         };
 
         assert_eq!(levels[0], expected_level);
@@ -1942,6 +1973,7 @@ mod tests {
             max_rep_level: 0,
             array: Arc::new(dict),
             logical_nulls,
+            def_levels_runs: None,
         };
         assert_eq!(levels[0], expected_level);
     }

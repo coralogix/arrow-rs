@@ -75,10 +75,10 @@ cli = ["arrow-array/chrono-tz", "arrow-cast/prettyprint", "tonic/tls-webpki-root
 
 [dev-dependencies]
 arrow-cast = { workspace = true, features = ["prettyprint"] }
-assert_cmd = "2.0.8"
+assert_cmd = ">=2.0.8, <2.1.0"
 http = "1.1.0"
 http-body = "1.0.0"
-hyper-util = "0.1"
+hyper-util = "=0.1.4"
 pin-project-lite = "0.2"
 tempfile = "3.3"
 tracing-log = { version = "0.2" }
