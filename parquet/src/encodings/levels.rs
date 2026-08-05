@@ -92,6 +92,17 @@ impl LevelEncoder {
         }
     }
 
+    /// Encodes a single level repeated `count` times.
+    #[inline]
+    pub fn put_run(&mut self, level: i16, count: usize) -> usize {
+        match self {
+            LevelEncoder::Rle(encoder) | LevelEncoder::RleV2(encoder) => {
+                encoder.put_run(level as u64, count)
+            }
+        }
+        count
+    }
+
     /// Finalizes level encoder, flush all intermediate buffers and return resulting
     /// encoded buffer. Returned buffer is already truncated to encoded bytes only.
     #[inline]

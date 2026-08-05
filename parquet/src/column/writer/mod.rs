@@ -546,6 +546,90 @@ impl<'a, E: ColumnValueEncoder> GenericColumnWriter<'a, E> {
         )
     }
 
+    /// Writes a batch of values with a uniform definition level.
+    ///
+    /// This avoids materializing and individually encoding a definition-level buffer.
+    pub fn write_def_level_range_batch(
+        &mut self,
+        values: &E::Values,
+        def_level: i16,
+        num_levels: usize,
+        min: Option<&E::T>,
+        max: Option<&E::T>,
+        distinct_count: Option<u64>,
+    ) -> Result<usize> {
+        if self.descr.max_rep_level() > 0 {
+            return Err(general_err!(
+                "Cannot write a definition-level range for a repeated column"
+            ));
+        }
+
+        if let Some(min) = min {
+            update_min(&self.descr, min, &mut self.column_metrics.min_column_value);
+        }
+        if let Some(max) = max {
+            update_max(&self.descr, max, &mut self.column_metrics.max_column_value);
+        }
+
+        if self.encoder.num_values() == 0 {
+            self.column_metrics.column_distinct_count = distinct_count;
+        } else {
+            self.column_metrics.column_distinct_count = None;
+        }
+
+        let mut values_offset = 0;
+        let mut levels_offset = 0;
+        let batch_size = self.props.write_batch_size();
+        while levels_offset < num_levels {
+            let levels_to_write = batch_size.min(num_levels - levels_offset);
+            values_offset += self.write_mini_batch_with_def_level(
+                values,
+                values_offset,
+                levels_to_write,
+                def_level,
+            )?;
+            levels_offset += levels_to_write;
+        }
+
+        Ok(values_offset)
+    }
+
+    fn write_mini_batch_with_def_level(
+        &mut self,
+        values: &E::Values,
+        values_offset: usize,
+        num_levels: usize,
+        def_level: i16,
+    ) -> Result<usize> {
+        let max_def_level = self.descr.max_def_level();
+        if max_def_level > 0 {
+            self.def_levels_encoder.put_run(def_level, num_levels);
+            if let Some(histogram) = self.page_metrics.definition_level_histogram.as_mut() {
+                histogram.increment_by(def_level, num_levels as i64);
+            }
+        }
+
+        let values_to_write = if def_level == max_def_level {
+            num_levels
+        } else {
+            self.page_metrics.num_page_nulls += num_levels as u64;
+            0
+        };
+
+        self.page_metrics.num_buffered_rows += num_levels as u32;
+        self.encoder.write(values, values_offset, values_to_write)?;
+        self.page_metrics.num_buffered_values += num_levels as u32;
+
+        if self.should_add_data_page() {
+            self.add_data_page()?;
+        }
+        if self.should_dict_fallback() {
+            self.dict_fallback()?;
+        }
+
+        Ok(values_to_write)
+    }
+
     /// Returns the estimated total memory usage.
     ///
     /// Unlike [`Self::get_estimated_total_bytes`] this is an estimate

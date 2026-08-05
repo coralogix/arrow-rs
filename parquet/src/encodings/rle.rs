@@ -184,6 +184,20 @@ impl RleEncoder {
         }
     }
 
+    /// Encodes `value` repeated `count` times without processing every value individually.
+    #[inline]
+    pub fn put_run(&mut self, value: u64, count: usize) {
+        let mut remaining = count;
+        while remaining > 0 && !self.is_accumulating_rle(value) {
+            self.put(value);
+            remaining -= 1;
+        }
+
+        if remaining > 0 {
+            self.extend_run(remaining);
+        }
+    }
+
     #[inline]
     #[allow(unused)]
     pub fn buffer(&self) -> &[u8] {
@@ -696,6 +710,22 @@ mod tests {
         let res1 = encoder1.flush_buffer();
         let res2 = encoder2.consume();
         assert_eq!(res1, &res2[..]);
+    }
+
+    #[test]
+    fn test_put_run_matches_individual_values() {
+        let runs = [(1, 1), (2, 7), (2, 9), (3, 3), (1, 1000), (0, 8)];
+        let mut individual = RleEncoder::new(3, 256);
+        let mut bulk = RleEncoder::new(3, 256);
+
+        for (value, count) in runs {
+            for _ in 0..count {
+                individual.put(value);
+            }
+            bulk.put_run(value, count);
+        }
+
+        assert_eq!(individual.consume(), bulk.consume());
     }
 
     #[test]
